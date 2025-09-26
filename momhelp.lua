@@ -1,8 +1,18 @@
--- Nexus (lite) — WS ↔ Backend (port 3005), ping + money + roster reporting (with logs)
+--[[
+Nexus (lite) — WS <-> Backend (port 3005)
+- ping 1s
+- money auto-detect (leaderstats/attr/gui)
+- roster 2s
+- egg inventory 5s (PlayerGui.Data.Egg)
+- auto reconnect
+]]
 
-if not game:IsLoaded() then game.Loaded:Wait() end
+-- ===== 0) รอเกมโหลด =====
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
 
--- 1) Resolve WebSocket
+-- ===== 1) Resolve WebSocket function =====
 local WSConnect = (syn and syn.websocket and syn.websocket.connect)
     or (Krnl and (function()
         repeat task.wait() until Krnl.WebSocket and Krnl.WebSocket.connect
@@ -15,15 +25,18 @@ if not WSConnect then
     return
 end
 
--- 2) Services
+-- ===== 2) Services =====
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 
 local LocalPlayer = Players.LocalPlayer
-while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
+while not LocalPlayer do
+    LocalPlayer = Players.LocalPlayer
+    task.wait()
+end
 
--- 3) ยูทิลอ่านเงินรวม
+-- ===== 3) ยูทิลอ่าน "เงินรวม" =====
 local CURRENCY_CANDIDATES = { "Money", "Cash", "Coins", "Gold", "Gems" }
 
 local function toNumber(s)
@@ -38,12 +51,14 @@ end
 local function readFromLeaderstats()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
     if not ls then return nil end
+    -- 3.1 หา key ยอดนิยมก่อน
     for _, name in ipairs(CURRENCY_CANDIDATES) do
         local v = ls:FindFirstChild(name)
         if v and typeof(v.Value) == "number" then
             return tonumber(v.Value)
         end
     end
+    -- 3.2 ถ้าใน leaderstats มี value เดียวเป็น number ก็ใช้
     local only
     for _, ch in ipairs(ls:GetChildren()) do
         if ch:IsA("ValueBase") and typeof(ch.Value) == "number" then
@@ -72,7 +87,7 @@ local function searchMoneyInGui()
     local function scan(obj, depth)
         if found then return end
         depth = depth or 0
-        if depth > 4 then return end
+        if depth > 4 then return end -- กันลึกเกิน
         for _, c in ipairs(obj:GetChildren()) do
             if c:IsA("TextLabel") or c:IsA("TextButton") then
                 local n = toNumber(c.Text)
@@ -89,136 +104,21 @@ local function detectMoney()
     return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui()
 end
 
--- 4) Nexus lite
-local Nexus = {
-    Host = "localhost:3005",
-    Path = "/Nexus",
-    IsConnected = false,
-    Socket = nil,
-}
-
-function Nexus:Send(Name, Payload)
-    if not (self.Socket and self.IsConnected) then return end
-    local ok, msg = pcall(function()
-        return HttpService:JSONEncode({ Name = Name, Payload = Payload })
-    end)
-    if ok and msg then pcall(function() self.Socket:Send(msg) end) end
-end
-
-local function makeRoomName()
-    local placeName
-    local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
-    if ok and info and info.Name then placeName = info.Name end
-    return (placeName or ("Place "..tostring(game.PlaceId))).." • "..string.sub(game.JobId,1,8)
-end
-
-function Nexus:_wsUrl()
-    local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
-        HttpService:UrlEncode(LocalPlayer.Name),
-        HttpService:UrlEncode(LocalPlayer.UserId),
-        HttpService:UrlEncode(game.JobId),
-        HttpService:UrlEncode(makeRoomName())
-    )
-    return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
-end
-
--- === Roster (รายชื่อผู้เล่นทั้งหมดในห้อง) ===
+-- ===== 4) อ่านรายชื่อผู้เล่นในห้อง (Roster) =====
 local function buildRoster()
     local list = {}
     for _, plr in ipairs(Players:GetPlayers()) do
         table.insert(list, {
-            id = plr.UserId ~= 0 and plr.UserId or nil, -- กันกรณี 0/undefined
+            id = (plr.UserId ~= 0) and plr.UserId or nil,
             name = plr.Name,
         })
     end
     return list
 end
 
-function Nexus:Connect(host)
-    if host then self.Host = host end
-    if self.Socket then pcall(function() self.Socket:Close() end) end
-    self.IsConnected = false
-
-    while true do
-        local ok, sock = pcall(WSConnect, self:_wsUrl())
-        if not ok or not sock then
-            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ ลองใหม่ใน 5 วิ...")
-            task.wait(5)
-        else
-            self.Socket = sock
-            self.IsConnected = true
-            print("[NexusLite] Connected → ws://"..self.Host..self.Path)
-
-            if sock.OnClose then
-                sock.OnClose:Connect(function()
-                    self.IsConnected = false
-                    print("[NexusLite] WS closed")
-                end)
-            end
-            if sock.OnMessage then
-                sock.OnMessage:Connect(function(_) end)
-            end
-
-            -- ส่งข้อมูลเบื้องต้น
-            self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
-            self:Send("SetJobId",   { Content = tostring(game.JobId)   })
-
-            local lastMoney
-            local t = 0
-
-            while self.IsConnected do
-                -- 1) ping
-                self:Send("ping", { t = os.time() })
-
-                -- 2) money (ของเรา)
-                local m = detectMoney()
-                if m and m ~= lastMoney then
-                    lastMoney = m
-                    self:Send("SetMoney", { Content = tostring(m) })
-                end
-
-                -- 3) roster ทุก 2 วิ (แนบ jobId มาด้วย)
-                t += 1
-                if t >= 2 then
-                    t = 0
-                    local roster = buildRoster()
-                    print(("[NexusLite] ส่ง Roster: %d คน"):format(#roster))
-                    -- note: รองรับกรณี id ว่างด้วย nameKey
-                    self:Send("SetRoster", { List = roster, JobId = tostring(game.JobId) })
-                end
-
-                task.wait(1)
-            end
-        end
-    end
-end
-
-function Nexus:Stop()
-    self.IsConnected = false
-    if self.Socket then pcall(function() self.Socket:Close() end) end
-end
-
-Players.PlayerAdded:Connect(function()
-    -- กระตุ้นให้รอบถัดไปส่ง Roster ครบ
-    task.wait(0.5)
-end)
-Players.PlayerRemoving:Connect(function()
-    task.wait(0.5)
-end)
-
-LocalPlayer.OnTeleport:Connect(function(state)
-    if state == Enum.TeleportState.Started then
-        Nexus:Stop()
-    end
-end)
-
--- ==== Egg Inventory Reporter (Client) ====
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
-
+-- ===== 5) อ่าน Egg Inventory จาก PlayerGui.Data.Egg =====
 local function readEggs()
-    -- โครงสร้างที่ให้มา: game:GetService("Players").<name>.PlayerGui.Data.Egg
+    -- โครงสร้าง: Players.<name>.PlayerGui.Data.Egg
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return {} end
     local data = pg:FindFirstChild("Data")
@@ -228,7 +128,6 @@ local function readEggs()
 
     local list = {}
     for _, ch in ipairs(eggFolder:GetChildren()) do
-        -- รองรับทั้ง Instance ปกติ และ ValueBase
         local T = ch:GetAttribute("T") or ch:GetAttribute("Type")
         local M = ch:GetAttribute("M") or ch:GetAttribute("Mutate")
         local nameAttr = ch:GetAttribute("Name") or ch.Name
@@ -245,22 +144,141 @@ local function readEggs()
     return list
 end
 
-local function sendInventory()
-    local eggs = readEggs()
-    if getgenv and getgenv().Nexus then
-        getgenv().Nexus:Send("SetInventory", { Eggs = eggs })
+-- ===== 6) สร้าง roomName (ชื่อเกม • 8 ตัวแรกของ jobId) =====
+local function makeRoomName()
+    local placeName
+    local ok, info = pcall(function()
+        return MarketplaceService:GetProductInfo(game.PlaceId)
+    end)
+    if ok and info and info.Name then
+        placeName = info.Name
+    end
+    return (placeName or ("Place " .. tostring(game.PlaceId))) .. " • " .. string.sub(game.JobId, 1, 8)
+end
+
+-- ===== 7) Nexus (lite) — WS Manager =====
+local Nexus = {
+    Host = "localhost:3005",
+    Path = "/Nexus",
+    IsConnected = false,
+    Socket = nil,
+}
+
+function Nexus:Send(Name, Payload)
+    if not (self.Socket and self.IsConnected) then return end
+    local ok, msg = pcall(function()
+        return HttpService:JSONEncode({ Name = Name, Payload = Payload })
+    end)
+    if ok and msg then
+        pcall(function() self.Socket:Send(msg) end)
     end
 end
 
--- ส่งครั้งแรก แล้วส่งทุก ๆ 5 วินาที (หรือปรับตามต้องการ)
-task.spawn(function()
+function Nexus:_wsUrl()
+    local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
+        HttpService:UrlEncode(LocalPlayer.Name),
+        HttpService:UrlEncode(LocalPlayer.UserId),
+        HttpService:UrlEncode(game.JobId),
+        HttpService:UrlEncode(makeRoomName())
+    )
+    return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
+end
+
+function Nexus:Connect(host)
+    if host then self.Host = host end
+
+    -- ปิดอันเดิม ถ้ามี
+    if self.Socket then pcall(function() self.Socket:Close() end) end
+    self.IsConnected = false
+
     while true do
-        pcall(sendInventory)
-        task.wait(5)
+        local ok, sock = pcall(WSConnect, self:_wsUrl())
+        if not ok or not sock then
+            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ จะลองใหม่ใน 5 วิ...")
+            task.wait(5)
+        else
+            self.Socket = sock
+            self.IsConnected = true
+            print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
+
+            -- on close
+            if sock.OnClose then
+                sock.OnClose:Connect(function()
+                    self.IsConnected = false
+                    print("[NexusLite] WS closed")
+                end)
+            end
+            -- on message (ไม่รับคำสั่งกลับตอนนี้)
+            if sock.OnMessage then
+                sock.OnMessage:Connect(function(_) end)
+            end
+
+            -- ส่งข้อมูลพื้นฐาน
+            self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
+            self:Send("SetJobId",   { Content = tostring(game.JobId)   })
+            -- roomName ถูกส่งใน query แล้ว ถ้าต้องการเปลี่ยน runtime:
+            -- self:Send("SetRoomName", { Content = makeRoomName() })
+
+            local lastMoney
+            local tRoster = 0
+            local tInv = 0
+
+            -- วงจร heartbeat
+            while self.IsConnected do
+                -- 1) ping ทุก 1 วิ
+                self:Send("ping", { t = os.time() })
+
+                -- 2) money (ถ้ามีการเปลี่ยนค่อยส่ง)
+                local m = detectMoney()
+                if m and m ~= lastMoney then
+                    lastMoney = m
+                    self:Send("SetMoney", { Content = tostring(m) })
+                end
+
+                -- 3) roster ทุก 2 วิ
+                tRoster += 1
+                if tRoster >= 2 then
+                    tRoster = 0
+                    local roster = buildRoster()
+                    self:Send("SetRoster", { List = roster, JobId = tostring(game.JobId) })
+                end
+
+                -- 4) inventory (eggs) ทุก 5 วิ
+                tInv += 1
+                if tInv >= 5 then
+                    tInv = 0
+                    local eggs = readEggs()
+                    self:Send("SetInventory", { Eggs = eggs })
+                end
+
+                task.wait(1)
+            end
+        end
+    end
+end
+
+function Nexus:Stop()
+    self.IsConnected = false
+    if self.Socket then
+        pcall(function() self.Socket:Close() end)
+    end
+end
+
+-- ===== 8) Hooks เล็กน้อย =====
+Players.PlayerAdded:Connect(function()
+    -- ทิ้งช่วงนิดหน่อยให้ WS loop รอบถัดไปเก็บ roster
+    task.wait(0.5)
+end)
+Players.PlayerRemoving:Connect(function()
+    task.wait(0.5)
+end)
+
+LocalPlayer.OnTeleport:Connect(function(state)
+    if state == Enum.TeleportState.Started then
+        Nexus:Stop()
     end
 end)
 
-
+-- ===== 9) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
