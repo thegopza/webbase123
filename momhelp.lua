@@ -1,4 +1,4 @@
--- Nexus (lite) — WS ↔ Backend (port 3005), ping + money + roster reporting
+-- Nexus (lite) — WS ↔ Backend (port 3005), ping + money + roster reporting (with logs)
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -89,7 +89,7 @@ local function detectMoney()
     return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui()
 end
 
--- 4) ตัวหลัก Nexus (lite)
+-- 4) Nexus lite
 local Nexus = {
     Host = "localhost:3005",
     Path = "/Nexus",
@@ -122,11 +122,14 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- === NEW: ส่งรายชื่อผู้เล่นทั้งหมดในห้อง (Roster) ===
+-- === Roster (รายชื่อผู้เล่นทั้งหมดในห้อง) ===
 local function buildRoster()
     local list = {}
     for _, plr in ipairs(Players:GetPlayers()) do
-        table.insert(list, { id = plr.UserId, name = plr.Name })
+        table.insert(list, {
+            id = plr.UserId ~= 0 and plr.UserId or nil, -- กันกรณี 0/undefined
+            name = plr.Name,
+        })
     end
     return list
 end
@@ -159,28 +162,29 @@ function Nexus:Connect(host)
             -- ส่งข้อมูลเบื้องต้น
             self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
-            -- roomName ถูกส่งใน URL แล้ว
 
             local lastMoney
-            local tickRoster = 0
+            local t = 0
 
             while self.IsConnected do
-                -- 1) ping ทุก 1 วิ
+                -- 1) ping
                 self:Send("ping", { t = os.time() })
 
-                -- 2) money (เฉพาะของเราเอง)
+                -- 2) money (ของเรา)
                 local m = detectMoney()
                 if m and m ~= lastMoney then
                     lastMoney = m
                     self:Send("SetMoney", { Content = tostring(m) })
                 end
 
-                -- 3) roster (ทุก ๆ 3 วิ)
-                tickRoster += 1
-                if tickRoster >= 3 then
-                    tickRoster = 0
+                -- 3) roster ทุก 2 วิ (แนบ jobId มาด้วย)
+                t += 1
+                if t >= 2 then
+                    t = 0
                     local roster = buildRoster()
-                    self:Send("SetRoster", { List = roster })
+                    print(("[NexusLite] ส่ง Roster: %d คน"):format(#roster))
+                    -- note: รองรับกรณี id ว่างด้วย nameKey
+                    self:Send("SetRoster", { List = roster, JobId = tostring(game.JobId) })
                 end
 
                 task.wait(1)
@@ -194,7 +198,14 @@ function Nexus:Stop()
     if self.Socket then pcall(function() self.Socket:Close() end) end
 end
 
--- ปิด WS ตอนเทเลพอร์ต
+Players.PlayerAdded:Connect(function()
+    -- กระตุ้นให้รอบถัดไปส่ง Roster ครบ
+    task.wait(0.5)
+end)
+Players.PlayerRemoving:Connect(function()
+    task.wait(0.5)
+end)
+
 LocalPlayer.OnTeleport:Connect(function(state)
     if state == Enum.TeleportState.Started then
         Nexus:Stop()
