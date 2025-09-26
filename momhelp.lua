@@ -1,12 +1,8 @@
--- Nexus (lite) — WS ↔ Backend (port 3005), ping + money reporting
--- หมายเหตุ: โค้ดนี้อาศัย WS ของสภาพแวดล้อม exploit (เช่น syn.websocket.connect / Krnl.WebSocket.connect)
+-- Nexus (lite) — WS ↔ Backend (port 3005), ping + money + roster reporting
 
--- ===== 0) เตรียมโหลดเกม =====
-if not game:IsLoaded() then
-    game.Loaded:Wait()
-end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
--- ===== 1) Resolve WebSocket connector =====
+-- 1) Resolve WebSocket
 local WSConnect = (syn and syn.websocket and syn.websocket.connect)
     or (Krnl and (function()
         repeat task.wait() until Krnl.WebSocket and Krnl.WebSocket.connect
@@ -19,7 +15,7 @@ if not WSConnect then
     return
 end
 
--- ===== 2) Services / locals =====
+-- 2) Services
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
@@ -27,54 +23,51 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 
--- ===== 3) ยูทิลอ่านเงินรวม =====
+-- 3) ยูทิลอ่านเงินรวม
 local CURRENCY_CANDIDATES = { "Money", "Cash", "Coins", "Gold", "Gems" }
 
 local function toNumber(s)
     if typeof(s) == "number" then return s end
     if typeof(s) == "string" then
         s = s:gsub("[%$,]", "")
-        local n = tonumber(s)
-        return n
+        return tonumber(s)
     end
     return nil
 end
 
 local function readFromLeaderstats()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
-    if not ls then return nil, "no-leaderstats" end
-    -- ชื่อยอดนิยมก่อน
+    if not ls then return nil end
     for _, name in ipairs(CURRENCY_CANDIDATES) do
         local v = ls:FindFirstChild(name)
         if v and typeof(v.Value) == "number" then
-            return tonumber(v.Value), "leaderstats:"..name
+            return tonumber(v.Value)
         end
     end
-    -- ถ้ามี value เดียวเป็น number ก็ใช้
     local only
     for _, ch in ipairs(ls:GetChildren()) do
         if ch:IsA("ValueBase") and typeof(ch.Value) == "number" then
             if only then only = nil break else only = ch end
         end
     end
-    if only then return tonumber(only.Value), "leaderstats:"..only.Name end
-    return nil, "leaderstats-not-found"
+    if only then return tonumber(only.Value) end
+    return nil
 end
 
 local function readFromAttributes()
     if LocalPlayer:GetAttribute("Money") then
-        return toNumber(LocalPlayer:GetAttribute("Money")), "player-attr"
+        return toNumber(LocalPlayer:GetAttribute("Money"))
     end
     local char = LocalPlayer.Character
     if char and char:GetAttribute("Money") then
-        return toNumber(char:GetAttribute("Money")), "char-attr"
+        return toNumber(char:GetAttribute("Money"))
     end
-    return nil, "no-attr"
+    return nil
 end
 
 local function searchMoneyInGui()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return nil, "no-playergui" end
+    if not pg then return nil end
     local found
     local function scan(obj, depth)
         if found then return end
@@ -89,21 +82,14 @@ local function searchMoneyInGui()
         end
     end
     scan(pg, 0)
-    if found then return found, "playergui-text" end
-    return nil, "playergui-not-found"
+    return found
 end
 
 local function detectMoney()
-    local v, src = readFromLeaderstats()
-    if v then return v, src end
-    v, src = readFromAttributes()
-    if v then return v, src end
-    v, src = searchMoneyInGui()
-    if v then return v, src end
-    return nil, "not-found"
+    return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui()
 end
 
--- ===== 4) ตัวหลัก Nexus (lite) =====
+-- 4) ตัวหลัก Nexus (lite)
 local Nexus = {
     Host = "localhost:3005",
     Path = "/Nexus",
@@ -116,32 +102,37 @@ function Nexus:Send(Name, Payload)
     local ok, msg = pcall(function()
         return HttpService:JSONEncode({ Name = Name, Payload = Payload })
     end)
-    if ok and msg then
-        pcall(function() self.Socket:Send(msg) end)
-    end
+    if ok and msg then pcall(function() self.Socket:Send(msg) end) end
+end
+
+local function makeRoomName()
+    local placeName
+    local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+    if ok and info and info.Name then placeName = info.Name end
+    return (placeName or ("Place "..tostring(game.PlaceId))).." • "..string.sub(game.JobId,1,8)
 end
 
 function Nexus:_wsUrl()
-    local roomName
-    -- สร้าง session label พื้นฐาน (ถ้ามีชื่อแม็พ)
-    local placeName
-    local ok, info = pcall(function()
-        return MarketplaceService:GetProductInfo(game.PlaceId)
-    end)
-    if ok and info and info.Name then placeName = info.Name end
-    roomName = (placeName or ("Place "..tostring(game.PlaceId))).." • "..string.sub(game.JobId,1,8)
     local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
         HttpService:UrlEncode(LocalPlayer.Name),
         HttpService:UrlEncode(LocalPlayer.UserId),
         HttpService:UrlEncode(game.JobId),
-        HttpService:UrlEncode(roomName)
+        HttpService:UrlEncode(makeRoomName())
     )
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
+-- === NEW: ส่งรายชื่อผู้เล่นทั้งหมดในห้อง (Roster) ===
+local function buildRoster()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        table.insert(list, { id = plr.UserId, name = plr.Name })
+    end
+    return list
+end
+
 function Nexus:Connect(host)
     if host then self.Host = host end
-    -- ปิดของเก่าถ้ามี
     if self.Socket then pcall(function() self.Socket:Close() end) end
     self.IsConnected = false
 
@@ -155,7 +146,6 @@ function Nexus:Connect(host)
             self.IsConnected = true
             print("[NexusLite] Connected → ws://"..self.Host..self.Path)
 
-            -- on message / close
             if sock.OnClose then
                 sock.OnClose:Connect(function()
                     self.IsConnected = false
@@ -163,32 +153,38 @@ function Nexus:Connect(host)
                 end)
             end
             if sock.OnMessage then
-                sock.OnMessage:Connect(function(_) end) -- ไม่ใช้รับคำสั่ง
+                sock.OnMessage:Connect(function(_) end)
             end
 
             -- ส่งข้อมูลเบื้องต้น
             self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
-            -- roomName ถูกแนบมาตั้งแต่ URL แล้ว ถ้าต้องการเปลี่ยน runtime ใช้ SetRoomName ได้
-            -- self:Send("SetRoomName", { Content = "My Room Label" })
+            -- roomName ถูกส่งใน URL แล้ว
 
-            -- วงจร heartbeat + money report
             local lastMoney
+            local tickRoster = 0
+
             while self.IsConnected do
-                -- 1) ping
+                -- 1) ping ทุก 1 วิ
                 self:Send("ping", { t = os.time() })
 
-                -- 2) money
-                local m = select(1, detectMoney())
+                -- 2) money (เฉพาะของเราเอง)
+                local m = detectMoney()
                 if m and m ~= lastMoney then
                     lastMoney = m
                     self:Send("SetMoney", { Content = tostring(m) })
                 end
 
+                -- 3) roster (ทุก ๆ 3 วิ)
+                tickRoster += 1
+                if tickRoster >= 3 then
+                    tickRoster = 0
+                    local roster = buildRoster()
+                    self:Send("SetRoster", { List = roster })
+                end
+
                 task.wait(1)
             end
-
-            -- ถ้าหลุด ให้วนไปเชื่อมใหม่
         end
     end
 end
@@ -198,13 +194,12 @@ function Nexus:Stop()
     if self.Socket then pcall(function() self.Socket:Close() end) end
 end
 
--- หยุด WS ตอนเทเลพอร์ต (กันค้าง)
+-- ปิด WS ตอนเทเลพอร์ต
 LocalPlayer.OnTeleport:Connect(function(state)
     if state == Enum.TeleportState.Started then
         Nexus:Stop()
     end
 end)
 
--- เปิดใช้
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
