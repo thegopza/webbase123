@@ -1,419 +1,210 @@
-if Nexus then Nexus:Stop() end
+-- Nexus (lite) — WS ↔ Backend (port 3005), ping + money reporting
+-- หมายเหตุ: โค้ดนี้อาศัย WS ของสภาพแวดล้อม exploit (เช่น syn.websocket.connect / Krnl.WebSocket.connect)
 
+-- ===== 0) เตรียมโหลดเกม =====
 if not game:IsLoaded() then
-    task.delay(60, function()
-        if NoShutdown then return end
-
-        if not game:IsLoaded() then
-            return game:Shutdown()
-        end
-
-        local Code = game:GetService'GuiService':GetErrorCode().Value
-
-        if Code >= Enum.ConnectionError.DisconnectErrors.Value then
-            return game:Shutdown()
-        end
-    end)
-    
     game.Loaded:Wait()
 end
 
-local Nexus = {}
-local WSConnect = syn and syn.websocket.connect or
-    (Krnl and (function() repeat task.wait() until Krnl.WebSocket and Krnl.WebSocket.connect return Krnl.WebSocket.connect end)()) or
-    WebSocket and WebSocket.connect
+-- ===== 1) Resolve WebSocket connector =====
+local WSConnect = (syn and syn.websocket and syn.websocket.connect)
+    or (Krnl and (function()
+        repeat task.wait() until Krnl.WebSocket and Krnl.WebSocket.connect
+        return Krnl.WebSocket.connect
+    end)())
+    or (WebSocket and WebSocket.connect)
 
 if not WSConnect then
-    if messagebox then
-        messagebox(('Nexus encountered an error while launching!\n\n%s'):format('Your exploit (' .. (identifyexecutor and identifyexecutor() or 'UNKNOWN') .. ') is not supported'), 'Roblox Account Manager', 0)
-    end
-    
+    warn("[NexusLite] ไม่พบบริการ WebSocket ของสภาพแวดล้อม")
     return
 end
 
-local TeleportService = game:GetService'TeleportService'
-local InputService = game:GetService'UserInputService'
-local HttpService = game:GetService'HttpService'
-local RunService = game:GetService'RunService'
-local GuiService = game:GetService'GuiService'
-local Players = game:GetService'Players'
-local LocalPlayer = Players.LocalPlayer if not LocalPlayer then repeat LocalPlayer = Players.LocalPlayer task.wait() until LocalPlayer end task.wait(0.5)
+-- ===== 2) Services / locals =====
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
 
-local UGS = UserSettings():GetService'UserGameSettings'
-local OldVolume = UGS.MasterVolume
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 
-LocalPlayer.OnTeleport:Connect(function(State)
-    if State == Enum.TeleportState.Started and Nexus.IsConnected then
-        Nexus:Stop() -- Apparently doesn't disconnect websockets on teleport so this has to be here
+-- ===== 3) ยูทิลอ่านเงินรวม =====
+local CURRENCY_CANDIDATES = { "Money", "Cash", "Coins", "Gold", "Gems" }
+
+local function toNumber(s)
+    if typeof(s) == "number" then return s end
+    if typeof(s) == "string" then
+        s = s:gsub("[%$,]", "")
+        local n = tonumber(s)
+        return n
     end
-end)
+    return nil
+end
 
-local Signal = {} do
-    Signal.__index = Signal
-
-    function Signal.new()
-        local self = setmetatable({ _BindableEvent = Instance.new'BindableEvent' }, Signal)
-        
-        return self
-    end
-
-    function Signal:Connect(Callback)
-        assert(typeof(Callback) == 'function', 'function expected, got ' .. typeof(Callback))
-
-        return self._BindableEvent.Event:Connect(Callback)
-    end
-
-    function Signal:Fire(...)
-        self._BindableEvent:Fire(...)
-    end
-
-    function Signal:Wait()
-        return self._BindableEvent.Event:Wait()
-    end
-
-    function Signal:Disconnect()
-        if self._BindableEvent then
-            self._BindableEvent:Destroy()
+local function readFromLeaderstats()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if not ls then return nil, "no-leaderstats" end
+    -- ชื่อยอดนิยมก่อน
+    for _, name in ipairs(CURRENCY_CANDIDATES) do
+        local v = ls:FindFirstChild(name)
+        if v and typeof(v.Value) == "number" then
+            return tonumber(v.Value), "leaderstats:"..name
         end
+    end
+    -- ถ้ามี value เดียวเป็น number ก็ใช้
+    local only
+    for _, ch in ipairs(ls:GetChildren()) do
+        if ch:IsA("ValueBase") and typeof(ch.Value) == "number" then
+            if only then only = nil break else only = ch end
+        end
+    end
+    if only then return tonumber(only.Value), "leaderstats:"..only.Name end
+    return nil, "leaderstats-not-found"
+end
+
+local function readFromAttributes()
+    if LocalPlayer:GetAttribute("Money") then
+        return toNumber(LocalPlayer:GetAttribute("Money")), "player-attr"
+    end
+    local char = LocalPlayer.Character
+    if char and char:GetAttribute("Money") then
+        return toNumber(char:GetAttribute("Money")), "char-attr"
+    end
+    return nil, "no-attr"
+end
+
+local function searchMoneyInGui()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil, "no-playergui" end
+    local found
+    local function scan(obj, depth)
+        if found then return end
+        depth = depth or 0
+        if depth > 4 then return end
+        for _, c in ipairs(obj:GetChildren()) do
+            if c:IsA("TextLabel") or c:IsA("TextButton") then
+                local n = toNumber(c.Text)
+                if n and n >= 0 then found = n; return end
+            end
+            scan(c, depth + 1)
+        end
+    end
+    scan(pg, 0)
+    if found then return found, "playergui-text" end
+    return nil, "playergui-not-found"
+end
+
+local function detectMoney()
+    local v, src = readFromLeaderstats()
+    if v then return v, src end
+    v, src = readFromAttributes()
+    if v then return v, src end
+    v, src = searchMoneyInGui()
+    if v then return v, src end
+    return nil, "not-found"
+end
+
+-- ===== 4) ตัวหลัก Nexus (lite) =====
+local Nexus = {
+    Host = "localhost:3005",
+    Path = "/Nexus",
+    IsConnected = false,
+    Socket = nil,
+}
+
+function Nexus:Send(Name, Payload)
+    if not (self.Socket and self.IsConnected) then return end
+    local ok, msg = pcall(function()
+        return HttpService:JSONEncode({ Name = Name, Payload = Payload })
+    end)
+    if ok and msg then
+        pcall(function() self.Socket:Send(msg) end)
     end
 end
 
-do -- Nexus
-    local BTN_CLICK = 'ButtonClicked:'
+function Nexus:_wsUrl()
+    local roomName
+    -- สร้าง session label พื้นฐาน (ถ้ามีชื่อแม็พ)
+    local placeName
+    local ok, info = pcall(function()
+        return MarketplaceService:GetProductInfo(game.PlaceId)
+    end)
+    if ok and info and info.Name then placeName = info.Name end
+    roomName = (placeName or ("Place "..tostring(game.PlaceId))).." • "..string.sub(game.JobId,1,8)
+    local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
+        HttpService:UrlEncode(LocalPlayer.Name),
+        HttpService:UrlEncode(LocalPlayer.UserId),
+        HttpService:UrlEncode(game.JobId),
+        HttpService:UrlEncode(roomName)
+    )
+    return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
+end
 
-    Nexus.Connected = Signal.new()
-    Nexus.Disconnected = Signal.new()
-    Nexus.MessageReceived = Signal.new()
+function Nexus:Connect(host)
+    if host then self.Host = host end
+    -- ปิดของเก่าถ้ามี
+    if self.Socket then pcall(function() self.Socket:Close() end) end
+    self.IsConnected = false
 
-    Nexus.Commands = {}
-    Nexus.Connections = {}
-
-    Nexus.ShutdownTime = 45
-    Nexus.ShutdownOnTeleportError = true
-
-    function Nexus:Send(Command, Payload)
-        assert(self.Socket ~= nil, 'websocket is nil')
-        assert(self.IsConnected, 'websocket not connected')
-        assert(typeof(Command) == 'string', 'Command must be a string, got ' .. typeof(Command))
-
-        if Payload then
-            assert(typeof(Payload) == 'table', 'Payload must be a table, got ' .. typeof(Payload))
-        end
-
-        local Message = HttpService:JSONEncode {
-            Name = Command,
-            Payload = Payload
-        }
-
-        self.Socket:Send(Message)
-    end
-
-    function Nexus:SetAutoRelaunch(Enabled)
-        self:Send('SetAutoRelaunch', { Content = Enabled and 'true' or 'false' })
-    end
-    
-    function Nexus:SetPlaceId(PlaceId)
-        self:Send('SetPlaceId', { Content = PlaceId })
-    end
-    
-    function Nexus:SetJobId(JobId)
-        self:Send('SetJobId', { Content = JobId })
-    end
-
-    function Nexus:Echo(Message)
-        self:Send('Echo', { Content = Message })
-    end
-
-    function Nexus:Log(...)
-        local T = {}
-
-        for Index, Value in pairs{ ... } do
-            table.insert(T, tostring(Value))
-        end
-
-        self:Send('Log', {
-            Content = table.concat(T, ' ')
-        })
-    end
-
-    function Nexus:CreateElement(ElementType, Name, Content, Size, Margins, Table)
-        assert(typeof(Name) == 'string', 'string expected on argument #1, got ' .. typeof(Name))
-        assert(typeof(Content) == 'string', 'string expected on argument #2, got ' .. typeof(Content))
-
-        assert(Name:find'%W' == nil, 'argument #1 cannot contain whitespace')
-
-        if Size then assert(typeof(Size) == 'table' and #Size == 2, 'table with 2 arguments expected on argument #3, got ' .. typeof(Size)) end
-        if Margins then assert(typeof(Margins) == 'table' and #Margins == 4, 'table with 4 arguments expected on argument #4, got ' .. typeof(Margins)) end
-        
-        local Payload = {
-            Name = Name,
-            Content = Content,
-            Size = Size and table.concat(Size, ','),
-            Margin = Margins and table.concat(Margins, ',')
-        }
-
-        if Table then
-            for Index, Value in pairs(Table) do
-                Payload[Index] = Value
-            end
-        end
-
-        self:Send(ElementType, Payload)
-    end
-
-    function Nexus:CreateButton(...)
-        return self:CreateElement('CreateButton', ...)
-    end
-
-    function Nexus:CreateTextBox(...)
-        return self:CreateElement('CreateTextBox', ...)
-    end
-
-    function Nexus:CreateNumeric(Name, Value, DecimalPlaces, Increment, Size, Margins)
-        return self:CreateElement('CreateNumeric', Name, tostring(Value), Size, Margins, { DecimalPlaces = DecimalPlaces, Increment = Increment })
-    end
-
-    function Nexus:CreateLabel(...)
-        return self:CreateElement('CreateLabel', ...)
-    end
-
-    function Nexus:NewLine(...)
-        return self:Send('NewLine')
-    end
-
-    function Nexus:GetText(Name)
-        return self:WaitForMessage('ElementText:', 'GetText', { Name = Name })
-    end
-
-    function Nexus:SetRelaunch(Seconds)
-        self:Send('SetRelaunch', { Seconds = Seconds })
-    end
-
-    function Nexus:WaitForMessage(Header, Message, Payload)
-        if Message then
-            task.defer(self.Send, self, Message, Payload)
-        end
-
-        local Message
-
-        while true do
-            Message = self.MessageReceived:Wait()
-
-            if Message:sub(1, #Header) == Header then
-                break
-            end
-        end
-
-        return Message:sub(#Header + 1)
-    end
-
-    function Nexus:Connect(Host, Bypass)
-        if not Bypass and self.IsConnected then return 'Ignoring connection request, Nexus is already connected' end
-
-        while true do
-            for Index, Connection in pairs(self.Connections) do
-                Connection:Disconnect()
-            end
-        
-            table.clear(self.Connections)
-
-            if self.IsConnected then
-                self.IsConnected = false
-                self.Socket = nil
-                self.Disconnected:Fire()
-            end
-
-            if self.Terminated then break end
-
-            if not Host then
-                Host = 'localhost:3005'
-            end
-
-            local Success, Socket = pcall(WSConnect, ('ws://%s/Nexus?name=%s&id=%s&jobId=%s'):format(Host, LocalPlayer.Name, LocalPlayer.UserId, game.JobId))
-
-            if not Success then task.wait(12) continue end
-
-            self.Socket = Socket
+    while true do
+        local ok, sock = pcall(WSConnect, self:_wsUrl())
+        if not ok or not sock then
+            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ ลองใหม่ใน 5 วิ...")
+            task.wait(5)
+        else
+            self.Socket = sock
             self.IsConnected = true
+            print("[NexusLite] Connected → ws://"..self.Host..self.Path)
 
-            table.insert(self.Connections, Socket.OnMessage:Connect(function(Message)
-                self.MessageReceived:Fire(Message)
-            end))
+            -- on message / close
+            if sock.OnClose then
+                sock.OnClose:Connect(function()
+                    self.IsConnected = false
+                    print("[NexusLite] WS closed")
+                end)
+            end
+            if sock.OnMessage then
+                sock.OnMessage:Connect(function(_) end) -- ไม่ใช้รับคำสั่ง
+            end
 
-            table.insert(self.Connections, Socket.OnClose:Connect(function()
-                self.IsConnected = false
-                self.Disconnected:Fire()
-            end))
+            -- ส่งข้อมูลเบื้องต้น
+            self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
+            self:Send("SetJobId",   { Content = tostring(game.JobId)   })
+            -- roomName ถูกแนบมาตั้งแต่ URL แล้ว ถ้าต้องการเปลี่ยน runtime ใช้ SetRoomName ได้
+            -- self:Send("SetRoomName", { Content = "My Room Label" })
 
-            self.Connected:Fire()
-
+            -- วงจร heartbeat + money report
+            local lastMoney
             while self.IsConnected do
-                local Success, Error = pcall(self.Send, self, 'ping')
+                -- 1) ping
+                self:Send("ping", { t = os.time() })
 
-                if not Success or self.Terminated then
-                    break
+                -- 2) money
+                local m = select(1, detectMoney())
+                if m and m ~= lastMoney then
+                    lastMoney = m
+                    self:Send("SetMoney", { Content = tostring(m) })
                 end
 
                 task.wait(1)
             end
+
+            -- ถ้าหลุด ให้วนไปเชื่อมใหม่
         end
     end
-
-    function Nexus:Stop()
-        self.IsConnected = false
-        self.Terminated = true
-        self.Disconnected:Fire()
-
-        if self.Socket then
-            pcall(function() self.Socket:Close() end)
-        end
-    end
-
-    function Nexus:AddCommand(Name, Function)
-        self.Commands[Name] = Function
-    end
-
-    function Nexus:RemoveCommand(Name)
-        self.Commands[Name] = nil
-    end
-
-    function Nexus:OnButtonClick(Name, Function)
-        self:AddCommand('ButtonClicked:' .. Name, Function)
-    end
-
-    Nexus.MessageReceived:Connect(function(Message)
-        local S = Message:find(' ')
-
-        if S then
-            local Command, Message = Message:sub(1, S - 1):lower(), Message:sub(S + 1)
-
-            if Nexus.Commands[Command] then
-                local Success, Error = pcall(Nexus.Commands[Command], Message)
-
-                if not Success and Error then
-                    Nexus:Log(('Error with command `%s`: %s'):format(Command, Error))
-                end
-            end
-        elseif Nexus.Commands[Message] then
-            local Success, Error = pcall(Nexus.Commands[Message], Message)
-
-            if not Success and Error then
-                Nexus:Log(('Error with command `%s`: %s'):format(Message, Error))
-            end
-        end
-    end)
 end
 
-do -- Default Commands
-    Nexus:AddCommand('execute', function(Message)
-        local Function, Error = loadstring(Message)
-        
-        if Function then
-            local Env = getfenv(Function)
-            
-            Env.Player = LocalPlayer
-            Env.print = function(...)
-                local T = {}
-
-                for Index, Value in pairs{ ... } do
-                    table.insert(T, tostring(Value))
-                end
-
-                Nexus:Log(table.concat(T, ' '))
-            end
-
-            if newcclosure then Env.print = newcclosure(Env.print) end
-
-            local S, E = pcall(Function)
-
-            if not S then
-                Nexus:Log(E)
-            end
-        else
-            Nexus:Log(Error)
-        end
-    end)
-
-    Nexus:AddCommand('teleport', function(Message)
-        local S = Message:find(' ')
-        local PlaceId, JobId = S and Message:sub(1, S - 1) or Message, S and Message:sub(S + 1)
-        
-        if JobId then
-            TeleportService:TeleportToPlaceInstance(tonumber(PlaceId), JobId)
-        else
-            TeleportService:Teleport(tonumber(PlaceId))
-        end
-    end)
-
-    Nexus:AddCommand('rejoin', function(Message)
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId)
-    end)
-
-    Nexus:AddCommand('mute', function()
-        if (UGS.MasterVolume - OldVolume) > 0.01 then
-            OldVolume = UGS.MasterVolume
-        end
-
-        UGS.MasterVolume = 0
-    end)
-
-    Nexus:AddCommand('unmute', function()
-        UGS.MasterVolume = OldVolume
-    end)
-
-    Nexus:AddCommand('performance', function(Message)
-        if _PERF then return end
-        
-        _PERF = true
-        _TARGETFPS = 8
-
-        if Message and tonumber(Message) then
-            _TARGETFPS = tonumber(Message)
-        end
-
-        local OldLevel = settings().Rendering.QualityLevel
-
-        RunService:Set3dRenderingEnabled(false)
-        settings().Rendering.QualityLevel = 1
-
-        InputService.WindowFocused:Connect(function()
-            RunService:Set3dRenderingEnabled(true)
-            settings().Rendering.QualityLevel = OldLevel
-            setfpscap(60)
-        end)
-
-        InputService.WindowFocusReleased:Connect(function()
-            OldLevel = settings().Rendering.QualityLevel
-
-            RunService:Set3dRenderingEnabled(false)
-            settings().Rendering.QualityLevel = 1
-            setfpscap(_TARGETFPS)
-        end)
-
-        setfpscap(_TARGETFPS)
-    end)
+function Nexus:Stop()
+    self.IsConnected = false
+    if self.Socket then pcall(function() self.Socket:Close() end) end
 end
 
-do -- Connections
-    GuiService.ErrorMessageChanged:Connect(function()
-        if NoShutdown then return end
+-- หยุด WS ตอนเทเลพอร์ต (กันค้าง)
+LocalPlayer.OnTeleport:Connect(function(state)
+    if state == Enum.TeleportState.Started then
+        Nexus:Stop()
+    end
+end)
 
-        local Code = GuiService:GetErrorCode().Value
-
-        if Code >= Enum.ConnectionError.DisconnectErrors.Value then
-            if not Nexus.ShutdownOnTeleportError and Code > Enum.ConnectionError.PlacelaunchOtherError.Value then
-                return
-            end
-            
-            task.delay(Nexus.ShutdownTime, game.Shutdown, game)
-        end
-    end)
-end
-
-local GEnv = getgenv()
-GEnv.Nexus = Nexus
-GEnv.performance = Nexus.Commands.performance -- fix the sirmeme error so that people stop being annoying saying "omg performance() doesnt work" (https://youtu.be/vVfg9ym2MNs?t=389)
-
-if not Nexus_Version then
-    Nexus:Connect()
-end
+-- เปิดใช้
+getgenv().Nexus = Nexus
+Nexus:Connect("localhost:3005")
