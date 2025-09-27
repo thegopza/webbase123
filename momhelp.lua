@@ -46,7 +46,42 @@ local function getCharacterSnapshot()
     }
 end
 
--- ===== Robust island resolver (ใช้ OccupyingPlayerId เป็นหลัก) =====
+-- ===== Robust island resolver (เน้น OccupyingPlayerId) =====
+local function getAssignedIslandNameAttr()
+    local v = LocalPlayer:GetAttribute("AssignedIslandName")
+    if typeof(v) == "string" and #v > 0 then return v end
+    return nil
+end
+
+-- คีย์ที่อาจใช้ระบุเจ้าของบน Island (เพิ่ม OccupyingPlayerId ตามรูป)
+local OWNER_KEYS = {
+    "OccupyingPlayerId","OccupyingPlayerID", -- <- สำคัญ
+    "UserId","OwnerId","Owner","AssignedUserId","IslandUserId","PlayerUserId"
+}
+local function anyEqualsUserId(inst, userId)
+    if not inst or not inst.GetAttribute then return false end
+    for _,key in ipairs(OWNER_KEYS) do
+        local val = inst:GetAttribute(key)
+        if val ~= nil then
+            local n = (typeof(val) == "string") and tonumber(val) or val
+            if typeof(n) == "number" and n == userId then return true end
+        end
+        local v2 = inst:FindFirstChild(key)
+        if v2 and v2:IsA("IntValue") and v2.Value == userId then return true end
+    end
+    return false
+end
+
+local function islandOwnedByPlayer(islandModel, userId)
+    if not islandModel then return false end
+    if anyEqualsUserId(islandModel, userId) then return true end
+    -- สแกนลูกทั้งหมด (บางเกมเก็บไว้ใต้ ENV/SPEC/Core)
+    for _,child in ipairs(islandModel:GetDescendants()) do
+        if anyEqualsUserId(child, userId) then return true end
+    end
+    return false
+end
+
 local function listIslands()
     local art = Workspace:FindFirstChild("Art")
     if not art then return {} end
@@ -59,77 +94,49 @@ local function listIslands()
     return out
 end
 
--- A) จาก attribute AssignedIslandName (ถ้ามี)
-local function getAssignedIslandNameAttr()
-    local v = LocalPlayer:GetAttribute("AssignedIslandName")
-    if typeof(v) == "string" and #v > 0 then return v end
-    return nil
-end
-
--- B) หาเกาะด้วย OccupyingPlayerId (ตามรูปที่ส่งมา)
-local function findIslandByOwnerId()
-    local uid = LocalPlayer.UserId
-    for _, island in ipairs(listIslands()) do
-        local v = island:GetAttribute("OccupyingPlayerId")
-        local n = (type(v) == "string") and tonumber(v) or v
-        if type(n) == "number" and n == uid then
-            return island
-        end
-    end
-    return nil
-end
-
--- C) fallback จากความใกล้ตัวละคร
 local function nearestIslandToCharacter()
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
+    local islands = listIslands()
     local best, bestDist = nil, math.huge
-    for _, island in ipairs(listIslands()) do
-        local cf = island:GetBoundingBox()
+    for _,island in ipairs(islands) do
+        local cf = island:GetPivot()
         local dx = hrp.Position.X - cf.Position.X
         local dz = hrp.Position.Z - cf.Position.Z
-        local d  = math.sqrt(dx*dx + dz*dz)
-        if d < bestDist then best, bestDist = island, d end
+        local dist = math.sqrt(dx*dx + dz*dz)
+        if dist < bestDist then best, bestDist = island, dist end
     end
     return best
 end
 
--- ตัวหาเกาะหลัก (รวมทั้งหมด)
-local __ISLAND_LOG_ONCE = false
 local function findIslandModel()
     local art = Workspace:FindFirstChild("Art")
+
+    -- A) ตรงชื่อจาก Attribute
     local byName = getAssignedIslandNameAttr()
     if art and byName and art:FindFirstChild(byName) then
-        if not __ISLAND_LOG_ONCE then
-            __ISLAND_LOG_ONCE = true
-            if Nexus and Nexus.Send then Nexus:Send("Log", { Content = "[Farm] Using island(by name): "..byName }) end
-        end
         return art[byName]
     end
-    local owned = findIslandByOwnerId()
-    if owned then
-        if not __ISLAND_LOG_ONCE then
-            __ISLAND_LOG_ONCE = true
-            if Nexus and Nexus.Send then Nexus:Send("Log", { Content = "[Farm] Using island(by owner): "..owned.Name }) end
+
+    -- B) มีแทกรหัสผู้เล่นบนเกาะ (OccupyingPlayerId ฯลฯ)
+    local uid = LocalPlayer.UserId
+    for _,island in ipairs(listIslands()) do
+        if islandOwnedByPlayer(island, uid) then
+            return island
         end
-        return owned
     end
-    local near = nearestIslandToCharacter()
-    if near and not __ISLAND_LOG_ONCE then
-        __ISLAND_LOG_ONCE = true
-        if Nexus and Nexus.Send then Nexus:Send("Log", { Content = "[Farm] Using island(nearest): "..near.Name }) end
-    end
-    return near
+
+    -- C) ไม่เจออะไรเลย → เอาเกาะที่ใกล้ตัวละครที่สุด
+    return nearestIslandToCharacter()
 end
 
--- รวบรวมช่อง Farm (Land/Water) ใต้เกาะที่หาได้
+-- ===== เก็บช่อง Farm (Land/Water) ใต้เกาะ =====
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
     local root = island:FindFirstChild("Core") or island
     local out  = {}
-    local pat  = isLand and "^Farm_split_%d+_%d+_%d+$"
-                         or "^WaterFarm_split_%d+_%d+_%d+$"
+    local pat  = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
     for _,d in ipairs(root:GetDescendants()) do
         if d:IsA("BasePart") and d.Name:match(pat) then
             out[#out+1] = d
@@ -138,37 +145,35 @@ local function collectFarmParts(isLand)
     return out
 end
 
--- ตรวจ “มีสัตว์/ไข่/ของวาง” ทับช่องนี้ไหม
+-- ===== Occupancy check ในกรอบ 8x14x8 (ไข่/สัตว์/ของวาง) =====
 local function tileOccupied(part)
     if not part then return false end
-    local centerCF = part.CFrame
-    local size = Vector3.new(8, 14, 8)
 
-    local params = OverlapParams.new()
-    params.FilterType = Enum.RaycastFilterType.Include
     local include = {}
     local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
     local pets = Workspace:FindFirstChild("Pets")
     if pbb  then table.insert(include, pbb)  end
     if pets then table.insert(include, pets) end
     if #include == 0 then include = { Workspace } end
+
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
     params.FilterDescendantsInstances = include
     params.RespectCanCollide = false
 
-    local parts = Workspace:GetPartBoundsInBox(centerCF, size, params)
+    local parts = Workspace:GetPartBoundsInBox(part.CFrame, Vector3.new(8,14,8), params)
     if #parts == 0 then return false end
 
-    local seenModel = {}
+    local seen = {}
     for _,p in ipairs(parts) do
         local m = p:FindFirstAncestorOfClass("Model")
-        if m and not seenModel[m] then
-            seenModel[m] = true
+        if m and not seen[m] then
+            seen[m] = true
             if m:FindFirstChildOfClass("Humanoid")
             or m:FindFirstChildWhichIsA("AnimationController", true)
             or m:GetAttribute("IsPet") or m:GetAttribute("PetType") or m:GetAttribute("T")
             or (pets and m:IsDescendantOf(pets))
-            or (pbb  and m:IsDescendantOf(pbb))
-            then
+            or (pbb  and m:IsDescendantOf(pbb)) then
                 return true
             end
         end
@@ -177,8 +182,8 @@ local function tileOccupied(part)
 end
 
 local function readFarmStatus()
-    local function count(isLand)
-        local tiles  = collectFarmParts(isLand)
+    local function count(kindIsLand)
+        local tiles  = collectFarmParts(kindIsLand)
         local filled = 0
         for _,t in ipairs(tiles) do
             if tileOccupied(t) then filled += 1 end
@@ -193,7 +198,7 @@ local function readFarmStatus()
     }
 end
 
--- ===== 3) ยูทิลอ่าน "เงินรวม" =====
+-- ===== 3) อ่านเงินรวม =====
 local CURRENCY_CANDIDATES = { "Money","Cash","Coins","Gold","Gems" }
 local function toNumber(s)
     if typeof(s) == "number" then return s end
@@ -288,7 +293,7 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- ===== 8) ตัวจัดการข้อความเข้า =====
+-- ===== 8) ตัวจัดการข้อความเข้า (รองรับ Exec/Echo) =====
 local function onSocketMessage(self, raw)
     if type(raw) ~= "string" then local okc, s = pcall(tostring, raw); raw = okc and s or "" end
     if raw == "ping" then return end
