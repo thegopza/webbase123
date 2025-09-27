@@ -8,10 +8,6 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - Exec (loadstring/pcall) + Log
 - Gift (รับคำสั่งจากเว็บ: GiftStart / GiftUIDs)
 - auto reconnect
-
-★ UPDATE:
-- เพิ่มจูนเวลา/รีทรายใน Gift: TUNE, waitUntilCloseAndSettle, holdEgg ยืนยันหลายเฟรม, giftOnce รีทราย+cooldown
-- ลดเคส “ส่งไม่ครบ/ส่งผิดของ” เวลาส่งจำนวนมาก
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -26,21 +22,6 @@ if not WSConnect then
     warn("[NexusLite] ไม่พบบริการ WebSocket ของสภาพแวดล้อม"); return
 end
 
--- ===== 1.5) Tunables สำหรับ Gift =====
-local TUNE = {
-    tapDelay1       = 0.20,  -- หน่วงหลังกด One
-    tapDelay2       = 0.30,  -- หน่วงหลังกด Two
-    afterHoldEgg    = 0.08,  -- เวลาพักหลังถือไข่เสร็จ
-    teleportMaxWait = 1.20,  -- รอสูงสุดหลังเทเลพอร์ตเพื่อให้เข้าที่
-    settleFrames    = 4,     -- ต้องนิ่งติดกันกี่เฟรม
-    inRange         = 2.4,   -- ระยะใกล้พอส่ง
-    giftCooldown    = 0.38,  -- หน่วงหลังยิง Gift แต่ละครั้ง
-    retryDelay      = 0.40,  -- หน่วงก่อนรีทราย
-    maxGiftRetries  = 2,     -- จำนวนรีทรายเมื่อยังไม่พร้อม
-    batchLongRest   = 0.50,  -- พักยาวทุก ๆ n ชิ้น
-    batchRestEvery  = 5,     -- ทุกกี่ชิ้นให้พักยาว
-}
-
 -- ===== 2) Services =====
 local HttpService        = game:GetService("HttpService")
 local Players            = game:GetService("Players")
@@ -48,7 +29,6 @@ local Workspace          = game:GetService("Workspace")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 local VirtualInputManager= game:GetService("VirtualInputManager")
-local RunService         = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
@@ -339,93 +319,34 @@ local function listEggsFiltered(typeSet, mutSet, limit)
     return out
 end
 
--- ===== Input helper =====
 local function tap(key)
     VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.04)
     VirtualInputManager:SendKeyEvent(false, key, false, game)
 end
 
--- ===== Gift timing helpers =====
-local function waitFrames(n) for i = 1, n do RunService.Heartbeat:Wait() end end
-
-local function humanoidRoot(modelOrPlayer)
-    local ch = modelOrPlayer and (modelOrPlayer.Character or modelOrPlayer)
-    if ch and ch:IsA("Model") then
-        return ch:FindFirstChild("HumanoidRootPart")
-    end
-    return LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-end
-
-local function isNear(targetPlayer, dist)
-    local myHRP = humanoidRoot(LocalPlayer)
-    local tHRP  = humanoidRoot(targetPlayer)
-    if not myHRP or not tHRP then return false end
-    dist = dist or TUNE.inRange
-    local d = (myHRP.Position - tHRP.Position).Magnitude
-    return d <= dist
-end
-
-local function waitUntilCloseAndSettle(targetPlayer, maxWait)
-    local deadline = tick() + (maxWait or TUNE.teleportMaxWait)
-    local stable = 0
-    while tick() < deadline do
-        if isNear(targetPlayer, TUNE.inRange) then
-            stable += 1
-            if stable >= TUNE.settleFrames then return true end
-        else
-            stable = 0
-        end
-        RunService.Heartbeat:Wait()
-    end
-    return false
-end
-
--- ===== ถือไข่ตาม UID แบบมีการยืนยัน =====
 local function holdEgg(uid)
-    if not uid then return false, "no uid" end
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
-    if deploy then deploy:SetAttribute("S2", "Egg_" .. tostring(uid)) end
-    tap(Enum.KeyCode.One); task.wait(TUNE.tapDelay1)
-    tap(Enum.KeyCode.Two); task.wait(TUNE.tapDelay2)
-    waitFrames(3) -- ให้ GUI/อุปกรณ์ถืออัปเดต
-    task.wait(TUNE.afterHoldEgg)
-    return true
+    if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
+    tap(Enum.KeyCode.One); task.wait(0.15)
+    tap(Enum.KeyCode.Two); task.wait(0.25)
 end
 
--- ===== ส่งหนึ่งครั้งแบบหน่วง + รีทราย =====
 local function giftOnce(targetPlayer, eggUID)
     if not targetPlayer or not targetPlayer.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
-
-    teleportNear(targetPlayer, TUNE.inRange - 0.6)
-    waitUntilCloseAndSettle(targetPlayer, TUNE.teleportMaxWait)
-
-    local okHold = holdEgg(eggUID)
-    if not okHold then
-        task.wait(TUNE.retryDelay)
-        okHold = holdEgg(eggUID)
-        if not okHold then return false, "hold failed" end
+    teleportNear(targetPlayer, 1.6)
+    holdEgg(eggUID)
+    local ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end)
+    if not ok then
+        holdEgg(eggUID)
+        ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end)
     end
-
-    local sent = false
-    local tries = 0
-    while tries <= TUNE.maxGiftRetries do
-        tries += 1
-        if GiftRE then
-            local ok = pcall(function() GiftRE:FireServer(targetPlayer) end)
-            if ok then sent = true break end
-        end
-        task.wait(TUNE.retryDelay)
-        holdEgg(eggUID) -- re-hold เผื่อหลุด
-    end
-
-    task.wait(TUNE.giftCooldown)
-    return sent
+    task.wait(0.22)
+    return ok == true
 end
 
--- ===== Gift batch =====
 local giftCancelFlag = false
 local function giftProgress(sendFn, sent, total, label)
     sendFn("GiftProgress", { sent = sent, total = total, label = label })
@@ -455,15 +376,12 @@ local function giftBatchFiltered(sendFn, payload)
 
     local sent=0; giftCancelFlag=false
     giftProgress(sendFn, 0, want, "start")
-    local loop = 0
     while sent < want and not giftCancelFlag do
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
         local ok = giftOnce(target, egg.uid)
-        if ok then sent += 1 end
-        loop += 1
+        sent += ok and 1 or 0
         giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
-        if loop % TUNE.batchRestEvery == 0 then task.wait(TUNE.batchLongRest) end
         task.wait(0.12)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
@@ -477,12 +395,11 @@ local function giftBatchUIDs(sendFn, payload)
     if type(uids)~="table" or #uids==0 then sendFn("GiftDone",{ok=false,reason="no UIDs",sent=0,total=0}); return end
     local total=#uids; local sent=0; giftCancelFlag=false
     giftProgress(sendFn, 0, total, "start")
-    for i,uid in ipairs(uids) do
+    for _,uid in ipairs(uids) do
         if giftCancelFlag then break end
         local ok = giftOnce(target, uid)
-        if ok then sent += 1 end
+        sent += ok and 1 or 0
         giftProgress(sendFn, sent, total, uid)
-        if i % TUNE.batchRestEvery == 0 then task.wait(TUNE.batchLongRest) end
         task.wait(0.12)
     end
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
@@ -532,8 +449,7 @@ local function onSocketMessage(self, raw)
     if name == "Exec" then
         local code = payload and payload.Code
         if type(code) ~= "string" or code == "" then self:Send("Log", { Content = "[Exec] empty code" }); return end
-        local loader = (loadstring or load)
-        if type(loader) ~= "function" then self:Send("Log",{Content="[Exec] no loadstring/load available on this executor"}); return end
+        local loader = (loadstring or load); if type(loader) ~= "function" then self:Send("Log",{Content="[Exec] no loadstring/load available on this executor"}); return end
         local fn, err = loader(code); if not fn then self:Send("Log",{Content="[Exec] load error: "..tostring(err)}); return end
         pcall(function()
             local env = (_G and type(_G)=="table") and _G or {}
