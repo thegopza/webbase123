@@ -4,8 +4,9 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
 - egg inventory 5s (PlayerGui.Data.Egg)
-- farm status 6s (นับ land/ช่อง/ของวาง/สัตว์)  **(อัปเดต: ยึด OccupyingPlayerId)**
-- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall + ส่ง Log กลับ
+- farm status 6s (OccupyingPlayerId + ป้องกันนับซ้ำ/ฟิลเตอร์ขนาด)
+- Exec (loadstring/pcall) + Log
+- Gift (รับคำสั่งจากเว็บ: GiftStart / GiftUIDs)
 - auto reconnect
 ]]
 
@@ -26,15 +27,15 @@ local HttpService        = game:GetService("HttpService")
 local Players            = game:GetService("Players")
 local Workspace          = game:GetService("Workspace")
 local MarketplaceService = game:GetService("MarketplaceService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local VirtualInputManager= game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 
 -- ===== toggle debug =====
 local DEBUG = false
-local function dprint(...)
-    if DEBUG then print("[Nexus/Farm]", ...) end
-end
+local function dprint(...) if DEBUG then print("[Nexus]", ...) end end
 
 -- ===== Helpers: Character snapshot =====
 local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
@@ -77,7 +78,6 @@ local function islandOwnedByUser(island, uid)
         local n = (typeof(attr)=="string") and tonumber(attr) or attr
         if typeof(n)=="number" and n == uid then return true end
     end
-    -- เผื่อบางเกมไปเก็บไว้ใต้โหนดย่อย
     for _,node in ipairs(island:GetDescendants()) do
         if node.GetAttribute then
             local v = node:GetAttribute("OccupyingPlayerId")
@@ -106,19 +106,14 @@ end
 
 local function findIslandModel()
     local art = Workspace:FindFirstChild("Art")
-    if not art then
-        dprint("ไม่พบ Workspace.Art")
-        return nil
-    end
+    if not art then dprint("ไม่พบ Workspace.Art"); return nil end
 
-    -- A) ถ้ามี AssignedIslandName ให้ลองก่อน
     local want = LocalPlayer:GetAttribute("AssignedIslandName")
     if typeof(want)=="string" and #want>0 and art:FindFirstChild(want) then
         dprint("ใช้ AssignedIslandName =", want)
         return art[want]
     end
 
-    -- B) ยึด OccupyingPlayerId
     local uid = LocalPlayer.UserId
     for _,island in ipairs(listIslands()) do
         if islandOwnedByUser(island, uid) then
@@ -127,45 +122,26 @@ local function findIslandModel()
         end
     end
 
-    -- C) ใกล้ที่สุด
     local near = nearestIslandToCharacter()
     if near then dprint("fallback ใกล้สุด →", near.Name) end
     return near
 end
 
--- ===== collect farm tiles (ป้องกันนับซ้ำ + ฟิลเตอร์ขนาด 8x8x8) =====
+-- ===== collect farm tiles (กันนับซ้ำ + ฟิลเตอร์ 8x8x8) =====
 local TILE_SIZE = Vector3.new(8,8,8)
-
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
-
-    -- ฟาร์มอาจอยู่ใต้ Core หรืออยู่ใต้เกาะเลย → สแกนทั้งเกาะ (เฉพาะ GetDescendants)
-    local pat = isLand and "^Farm_split_%d+_%d+_%d+$"
-                         or "^WaterFarm_split_%d+_%d+_%d+$"
-
+    local pat = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
     local out, seen = {}, {}
 
     local function consider(inst)
         if inst:IsA("BasePart") and inst.Name:match(pat) and inst.Size == TILE_SIZE then
-            if not seen[inst] then
-                seen[inst] = true
-                out[#out+1] = inst
-            end
+            if not seen[inst] then seen[inst]=true; out[#out+1]=inst end
         end
     end
-
-    -- ตรวจตัว island เอง (เผื่อวางไว้เป็นลูกตรง)
     consider(island)
-    -- และลูก-หลานทั้งหมด (พอแล้ว ไม่ใช้ GetChildren ซ้ำ)
-    for _,d in ipairs(island:GetDescendants()) do
-        consider(d)
-    end
-
-    if DEBUG then
-        dprint(isLand and "LAND parts" or "WATER parts", "พบ", #out)
-        for i=1, math.min(3, #out) do dprint("  •", out[i].Name) end
-    end
+    for _,d in ipairs(island:GetDescendants()) do consider(d) end
     return out
 end
 
@@ -211,22 +187,12 @@ end
 local function readFarmStatus()
     local function count(isLand)
         local tiles, filled = collectFarmParts(isLand), 0
-        for _,t in ipairs(tiles) do
-            if tileOccupied(t) then filled += 1 end
-        end
+        for _,t in ipairs(tiles) do if tileOccupied(t) then filled += 1 end end
         return filled, #tiles
     end
     local landFilled,  landTotal  = count(true)
     local waterFilled, waterTotal = count(false)
-
-    if DEBUG then
-        dprint(("สรุป Land: %d/%d | Water: %d/%d"):format(landFilled, landTotal, waterFilled, waterTotal))
-    end
-
-    return {
-        Land  = { filled = landFilled,  total = landTotal  },
-        Water = { filled = waterFilled, total = waterTotal },
-    }
+    return { Land={filled=landFilled,total=landTotal}, Water={filled=waterFilled,total=waterTotal} }
 end
 
 -- ===== 3) ยูทิลอ่าน "เงินรวม" =====
@@ -274,7 +240,7 @@ local function searchMoneyInGui()
 end
 local function detectMoney() return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui() end
 
--- ===== 4) รายชื่อผู้เล่นในห้อง (Roster) =====
+-- ===== 4) รายชื่อผู้เล่น (Roster) =====
 local function buildRoster()
     local list = {}
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -283,7 +249,7 @@ local function buildRoster()
     return list
 end
 
--- ===== 5) Egg Inventory =====
+-- ===== 5) Egg Inventory (จาก PlayerGui.Data.Egg) =====
 local function readEggs()
     local pg = LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return {} end
     local data = pg:FindFirstChild("Data");            if not data then return {} end
@@ -297,6 +263,147 @@ local function readEggs()
         list[#list+1] = { id = ch.Name, name = nameAttr, T = T, M = M, count = count }
     end
     return list
+end
+
+-- ===== 5.5) Gift helpers (Build A Zoo) =====
+local GiftRE = (function()
+    local ok, remote = pcall(function()
+        return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("GiftRE")
+    end)
+    return ok and remote or nil
+end)()
+
+local function getHRP(plr)
+    plr = plr or LocalPlayer
+    local ch = plr and plr.Character
+    return ch and ch:FindFirstChild("HumanoidRootPart")
+end
+
+local function teleportNear(targetPlr, offset)
+    offset = offset or 1.6
+    local myHRP, tgHRP = getHRP(LocalPlayer), getHRP(targetPlr)
+    if not (myHRP and tgHRP) then return false, "missing HRP" end
+    local dir = (myHRP.Position - tgHRP.Position)
+    if dir.Magnitude < 0.1 then dir = Vector3.new(1,0,0) end
+    pcall(function()
+        myHRP.CFrame = CFrame.new(tgHRP.Position + dir.Unit * offset, tgHRP.Position)
+    end)
+    task.wait(0.08)
+    return true
+end
+
+local function eggFolder()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local data = pg and pg:FindFirstChild("Data")
+    return data and data:FindFirstChild("Egg") or nil
+end
+
+local function normalizeMut(m) if not m then return nil end m = tostring(m); if m=="Jurassic" then return "Dino" end return m end
+
+local function listEggsFiltered(typeSet, mutSet, limit)
+    local eg = eggFolder()
+    local out = {}
+    if not eg then return out end
+    for _, ch in ipairs(eg:GetChildren()) do
+        if #ch:GetChildren() == 0 then
+            local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
+            local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
+            local okType = (not typeSet) or (next(typeSet)==nil) or typeSet[tostring(T)]
+            local okMut  = (not mutSet)  or (next(mutSet) ==nil) or mutSet[tostring(M or "")]
+            if okType and okMut then
+                out[#out+1] = { uid = ch.Name, T = tostring(T), M = M }
+                if limit and #out >= limit then break end
+            end
+        end
+    end
+    return out
+end
+
+local function tap(key)
+    VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.04)
+    VirtualInputManager:SendKeyEvent(false, key, false, game)
+end
+
+local function holdEgg(uid)
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+    local data = pg and pg:FindFirstChild("Data")
+    local deploy = data and data:FindFirstChild("Deploy")
+    if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
+    tap(Enum.KeyCode.One); task.wait(0.06)
+    tap(Enum.KeyCode.Two); task.wait(0.06)
+    tap(Enum.KeyCode.Two); task.wait(0.10)
+end
+
+local function giftOnce(targetPlayer, eggUID)
+    if not targetPlayer or not targetPlayer.Parent then return false, "no target" end
+    if not eggUID then return false, "no egg uid" end
+    teleportNear(targetPlayer, 1.6)
+    holdEgg(eggUID)
+    local ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end)
+    if not ok then
+        holdEgg(eggUID)
+        ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end)
+    end
+    task.wait(0.22)
+    return ok == true
+end
+
+local giftCancelFlag = false
+local function giftProgress(sendFn, sent, total, label)
+    sendFn("GiftProgress", { sent = sent, total = total, label = label })
+end
+
+local function resolveTarget(str)
+    if not str then return nil end
+    for _,p in ipairs(Players:GetPlayers()) do
+        if tostring(p.UserId)==tostring(str) or p.Name==tostring(str) then return p end
+    end
+    return nil
+end
+
+local function giftBatchFiltered(sendFn, payload)
+    if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
+    local target = resolveTarget(payload.Target)
+    if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+
+    local typeSet = payload.T and {[tostring(payload.T)]=true} or {}
+    local mutSet  = payload.M and {[tostring(normalizeMut(payload.M))]=true} or {}
+    if mutSet["Dino"] then mutSet["Jurassic"]=true end
+
+    local pool = listEggsFiltered(typeSet, mutSet, nil)
+    local want = tonumber(payload.Amount or 0) or 0
+    if want<=0 then want = #pool end
+    want = math.min(want, #pool)
+
+    local sent=0; giftCancelFlag=false
+    giftProgress(sendFn, 0, want, "start")
+    while sent < want and not giftCancelFlag do
+        local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
+        if not egg then break end
+        local ok = giftOnce(target, egg.uid)
+        sent += ok and 1 or 0
+        giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
+        task.wait(0.12)
+    end
+    sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+end
+
+local function giftBatchUIDs(sendFn, payload)
+    if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
+    local target = resolveTarget(payload.Target)
+    if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+    local uids = payload.UIDs
+    if type(uids)~="table" or #uids==0 then sendFn("GiftDone",{ok=false,reason="no UIDs",sent=0,total=0}); return end
+    local total=#uids; local sent=0; giftCancelFlag=false
+    giftProgress(sendFn, 0, total, "start")
+    for _,uid in ipairs(uids) do
+        if giftCancelFlag then break end
+        local ok = giftOnce(target, uid)
+        sent += ok and 1 or 0
+        giftProgress(sendFn, sent, total, uid)
+        task.wait(0.12)
+    end
+    sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
 
 -- ===== 6) ชื่อห้อง =====
@@ -324,7 +431,7 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- ===== 8) onMessage (Exec/Echo) =====
+-- ===== 8) onMessage (Exec/Echo/Gift) =====
 local function onSocketMessage(self, raw)
     if type(raw) ~= "string" then local okc, s = pcall(tostring, raw); raw = okc and s or "" end
     if raw == "ping" then return end
@@ -332,28 +439,19 @@ local function onSocketMessage(self, raw)
     if not ok or type(obj) ~= "table" then return end
     local name, payload = obj.Name, obj.Payload
 
+    local function slog(msg) self:Send("Log",{Content=tostring(msg)}) end
+
     if name == "Echo" then
         local content = payload and payload.Content
-        if content then
-            print("[Echo]", content)
-            self:Send("Log", { Content = "[Echo] " .. tostring(content) })
-        end
+        if content then print("[Echo]", content); self:Send("Log", { Content = "[Echo] " .. tostring(content) }) end
         return
     end
 
     if name == "Exec" then
         local code = payload and payload.Code
-        if type(code) ~= "string" or code == "" then
-            self:Send("Log", { Content = "[Exec] empty code" }); return
-        end
-        local loader = (loadstring or load)
-        if type(loader) ~= "function" then
-            self:Send("Log", { Content = "[Exec] no loadstring/load available on this executor" }); return
-        end
-        local fn, err = loader(code)
-        if not fn then
-            self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) }); return
-        end
+        if type(code) ~= "string" or code == "" then self:Send("Log", { Content = "[Exec] empty code" }); return end
+        local loader = (loadstring or load); if type(loader) ~= "function" then self:Send("Log",{Content="[Exec] no loadstring/load available on this executor"}); return end
+        local fn, err = loader(code); if not fn then self:Send("Log",{Content="[Exec] load error: "..tostring(err)}); return end
         pcall(function()
             local env = (_G and type(_G)=="table") and _G or {}
             env.Player = LocalPlayer
@@ -367,6 +465,22 @@ local function onSocketMessage(self, raw)
         if not okRun then warn("[Exec] runtime error:", errRun); self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) }) end
         return
     end
+
+    -- === GIFT: Filter-based (T/M/Amount) ===
+    if name == "GiftStart" then
+        slog("[GiftStart] to "..tostring(payload and payload.Target or "?"))
+        task.spawn(function() giftBatchFiltered(function(n,p) self:Send(n,p) end, payload or {}) end)
+        return
+    end
+
+    -- === GIFT: UID list ===
+    if name == "GiftUIDs" then
+        slog("[GiftUIDs] to "..tostring(payload and payload.Target or "?"))
+        task.spawn(function() giftBatchUIDs(function(n,p) self:Send(n,p) end, payload or {}) end)
+        return
+    end
+
+    if name == "GiftStop" then giftCancelFlag = true; slog("[Gift] cancel requested"); return end
 end
 
 -- ===== 9) Connect / Loop =====
@@ -394,54 +508,33 @@ function Nexus:Connect(host)
             local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
 
             while self.IsConnected do
-                -- 1) ping 1s
                 self:Send("ping", { t = os.time() })
 
-                -- 2) money (เฉพาะตอนเปลี่ยน)
                 local m = detectMoney()
-                if m and m ~= lastMoney then
-                    lastMoney = m
-                    self:Send("SetMoney", { Content = tostring(m) })
-                end
+                if m and m ~= lastMoney then lastMoney = m; self:Send("SetMoney", { Content = tostring(m) }) end
 
-                -- 3) roster ทุก 2 วิ
                 tRoster += 1
-                if tRoster >= 2 then
-                    tRoster = 0
-                    self:Send("SetRoster", { List = buildRoster(), JobId = tostring(game.JobId) })
-                end
+                if tRoster >= 2 then tRoster = 0; self:Send("SetRoster", { List = buildRoster(), JobId = tostring(game.JobId) }) end
 
-                -- 4) inventory (eggs) ทุก 5 วิ
                 tInv += 1
-                if tInv >= 5 then
-                    tInv = 0
-                    self:Send("SetInventory", { Eggs = readEggs() })
-                end
+                if tInv >= 5 then tInv = 0; self:Send("SetInventory", { Eggs = readEggs() }) end
 
-                -- 5) character snapshot ทุก 1 วิ (ส่งเฉพาะเมื่อเปลี่ยน)
                 tChar += 1
                 if tChar >= 1 then
                     tChar = 0
                     local snap = getCharacterSnapshot()
                     if snap then
                         local js = HttpService:JSONEncode(snap)
-                        if js ~= lastCharJson then
-                            lastCharJson = js
-                            self:Send("SetCharacter", { Character = snap })
-                        end
+                        if js ~= lastCharJson then lastCharJson = js; self:Send("SetCharacter", { Character = snap }) end
                     end
                 end
 
-                -- 6) farm status ทุก 6 วิ (ส่งเฉพาะเมื่อเปลี่ยน)
                 tFarm += 1
                 if tFarm >= 6 then
                     tFarm = 0
                     local farms = readFarmStatus()
                     local js = HttpService:JSONEncode(farms)
-                    if js ~= lastFarmsJson then
-                        lastFarmsJson = js
-                        self:Send("SetFarms", farms)
-                    end
+                    if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
                 task.wait(1)
