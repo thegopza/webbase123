@@ -30,9 +30,101 @@ end
 -- ===== 2) Services =====
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local MarketplaceService = game:GetService("MarketplaceService")
+
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
+
+-- ===== NEW: ตัวอ่านตัวละคร (HP/MaxHP/Pos) =====
+local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
+local function getCharacterSnapshot()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local pos = hrp and hrp.Position
+    return {
+        characterName = char.Name,
+        health = hum and hum.Health or nil,
+        maxHealth = hum and hum.MaxHealth or nil,
+        position = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
+    }
+end
+
+-- ===== NEW: ตัวช่วยหาเกาะ + พาร์ตฟาร์ม =====
+local function getAssignedIslandName()
+    return LocalPlayer:GetAttribute("AssignedIslandName")
+end
+local function findIslandModel()
+    local art = Workspace:FindFirstChild("Art")
+    if not art then return nil end
+    local want = getAssignedIslandName()
+    if want and art:FindFirstChild(want) then return art[want] end
+    -- fallback: เอาอันแรกที่ชื่อขึ้นต้น Island
+    for _,m in ipairs(art:GetChildren()) do
+        if m:IsA("Model") and m.Name:match("^Island") then return m end
+    end
+    return nil
+end
+
+local function collectFarmParts(isLand)
+    local island = findIslandModel()
+    if not island then return {} end
+    -- ฟาร์มอยู่ใต้ Core (จากรูปที่ให้มา)
+    local root = island:FindFirstChild("Core") or island
+    local out = {}
+    local pat = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
+    for _,d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") and d.Name:match(pat) then
+            table.insert(out, d)
+        end
+    end
+    return out
+end
+
+-- ตรวจ “มีสัตว์/ไข่ทับช่องนี้ไหม” ด้วย Overlap box ใกล้จุดวาง
+local function tileOccupied(part)
+    local centerCF = part.CFrame
+    local size = Vector3.new(8,14,8)
+    local params = OverlapParams.new()
+    params.RespectCanCollide = false
+    local parts = Workspace:GetPartBoundsInBox(centerCF, size, params)
+    if #parts == 0 then return false end
+    local seen = {}
+    for _,p in ipairs(parts) do
+        local m = p:FindFirstAncestorOfClass("Model")
+        if m and not seen[m] then
+            seen[m] = true
+            -- สัญญาณว่าเป็นสัตว์/ไข่: มี Humanoid/AnimationController/Attribute is pet/อยู่ใน PlayerBuiltBlocks หรือ workspace.Pets
+            if m:FindFirstChildOfClass("Humanoid")
+            or m:FindFirstChildWhichIsA("AnimationController", true)
+            or (m:GetAttribute("IsPet") or m:GetAttribute("PetType") or m:GetAttribute("T"))
+            or (m:IsDescendantOf(Workspace:FindFirstChild("PlayerBuiltBlocks") or m) )
+            or (Workspace:FindFirstChild("Pets") and m:IsDescendantOf(Workspace.Pets)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function readFarmStatus()
+    local function count(isLand)
+        local tiles = collectFarmParts(isLand)
+        local filled = 0
+        for _,t in ipairs(tiles) do
+            if tileOccupied(t) then filled += 1 end
+        end
+        return filled, #tiles
+    end
+    local landFilled, landTotal   = count(true)
+    local waterFilled, waterTotal = count(false)
+    return {
+        Land  = { filled = landFilled,  total = landTotal  },
+        Water = { filled = waterFilled, total = waterTotal },
+    }
+end
 
 -- ===== 3) ยูทิลอ่าน "เงินรวม" =====
 local CURRENCY_CANDIDATES = { "Money", "Cash", "Coins", "Gold", "Gems" }
@@ -344,51 +436,71 @@ function Nexus:Connect(host)
     while true do
         local ok, sock = pcall(WSConnect, self:_wsUrl())
         if not ok or not sock then
-            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ จะลองใหม่ใน 5 วิ..."); task.wait(5)
+            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ จะลองใหม่ใน 5 วิ...")
+            task.wait(5)
         else
-            self.Socket = sock; self.IsConnected = true
+            self.Socket = sock
+            self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
 
-            if sock.OnClose then sock.OnClose:Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
-            if sock.OnMessage then sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end) end
+            if sock.OnClose then
+                sock.OnClose:Connect(function()
+                    self.IsConnected = false
+                    print("[NexusLite] WS closed")
+                end)
+            end
+            if sock.OnMessage then
+                sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end)
+            end
 
-            -- Initial info
+            -- ส่งค่าพื้นฐาน
             self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney
-            local tRoster, tInv, tFarm = 0, 0, 0
+            local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
 
             while self.IsConnected do
                 -- 1) ping 1s
                 self:Send("ping", { t = os.time() })
 
-                -- 2) money (on change)
+                -- 2) money (เฉพาะตอนเปลี่ยน)
                 local m = detectMoney()
-                if m and m ~= lastMoney then lastMoney = m; self:Send("SetMoney", { Content = tostring(m) }) end
+                if m and m ~= lastMoney then
+                    lastMoney = m
+                    self:Send("SetMoney", { Content = tostring(m) })
+                end
 
-                -- 3) roster 2s
+                -- 3) roster ทุก 2 วิ
                 tRoster += 1
                 if tRoster >= 2 then
                     tRoster = 0
                     self:Send("SetRoster", { List = buildRoster(), JobId = tostring(game.JobId) })
                 end
 
-                -- 4) egg inventory 5s
+                -- 4) inventory (eggs) ทุก 5 วิ
                 tInv += 1
                 if tInv >= 5 then
                     tInv = 0
                     self:Send("SetInventory", { Eggs = readEggs() })
                 end
 
-                -- 5) farm status 6s
-                tFarm += 1
-                if tFarm >= 6 then
-                    tFarm = 0
-                    local okFS, snapshot = pcall(buildFarmStatusSnapshot)
-                    if okFS and type(snapshot)=="table" then
-                        self:Send("SetFarmStatus", { List = snapshot })
+                -- NEW 5) character snapshot ทุก 1 วิ
+                tChar += 1
+                if tChar >= 1 then
+                    tChar = 0
+                    local snap = getCharacterSnapshot()
+                    if snap then
+                        self:Send("SetCharacter", { Character = snap })
                     end
+                end
+
+                -- NEW 6) farm status ทุก 5 วิ
+                tFarm += 1
+                if tFarm >= 5 then
+                    tFarm = 0
+                    local farms = readFarmStatus()
+                    self:Send("SetFarms", farms)
                 end
 
                 task.wait(1)
@@ -410,3 +522,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
