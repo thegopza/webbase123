@@ -1,4 +1,4 @@
--- Build A Zoo — Auto Gift (Target dropdown fixed + TP + batch + progress)
+-- Build A Zoo — Auto Gift (Target dropdown fixed + TP + batch + progress) 2
 
 -- ====== Services ======
 local Players = game:GetService("Players")
