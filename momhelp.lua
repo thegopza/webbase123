@@ -4,8 +4,8 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
 - egg inventory 5s (PlayerGui.Data.Egg)
-- farm status 6s (นับ land/ช่อง/ของวาง/สัตว์)
-- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall + พิมพ์ลง Dev Console และส่ง Log กลับ
+- farm status 6s (นับ land/ช่อง/ของวาง/สัตว์)  **(อัปเดต: ยึด OccupyingPlayerId)**
+- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall + ส่ง Log กลับ
 - auto reconnect
 ]]
 
@@ -30,6 +30,12 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 
+-- ===== toggle debug =====
+local DEBUG = false
+local function dprint(...)
+    if DEBUG then print("[Nexus/Farm]", ...) end
+end
+
 -- ===== Helpers: Character snapshot =====
 local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
 local function getCharacterSnapshot()
@@ -46,42 +52,7 @@ local function getCharacterSnapshot()
     }
 end
 
--- ===== Robust island resolver (เน้น OccupyingPlayerId) =====
-local function getAssignedIslandNameAttr()
-    local v = LocalPlayer:GetAttribute("AssignedIslandName")
-    if typeof(v) == "string" and #v > 0 then return v end
-    return nil
-end
-
--- คีย์ที่อาจใช้ระบุเจ้าของบน Island (เพิ่ม OccupyingPlayerId ตามรูป)
-local OWNER_KEYS = {
-    "OccupyingPlayerId","OccupyingPlayerID", -- <- สำคัญ
-    "UserId","OwnerId","Owner","AssignedUserId","IslandUserId","PlayerUserId"
-}
-local function anyEqualsUserId(inst, userId)
-    if not inst or not inst.GetAttribute then return false end
-    for _,key in ipairs(OWNER_KEYS) do
-        local val = inst:GetAttribute(key)
-        if val ~= nil then
-            local n = (typeof(val) == "string") and tonumber(val) or val
-            if typeof(n) == "number" and n == userId then return true end
-        end
-        local v2 = inst:FindFirstChild(key)
-        if v2 and v2:IsA("IntValue") and v2.Value == userId then return true end
-    end
-    return false
-end
-
-local function islandOwnedByPlayer(islandModel, userId)
-    if not islandModel then return false end
-    if anyEqualsUserId(islandModel, userId) then return true end
-    -- สแกนลูกทั้งหมด (บางเกมเก็บไว้ใต้ ENV/SPEC/Core)
-    for _,child in ipairs(islandModel:GetDescendants()) do
-        if anyEqualsUserId(child, userId) then return true end
-    end
-    return false
-end
-
+-- ===== Island resolver (ยึด OccupyingPlayerId) =====
 local function listIslands()
     local art = Workspace:FindFirstChild("Art")
     if not art then return {} end
@@ -91,19 +62,43 @@ local function listIslands()
             table.insert(out, m)
         end
     end
+    table.sort(out, function(a,b)
+        local na = tonumber(a.Name:match("(%d+)")) or 0
+        local nb = tonumber(b.Name:match("(%d+)")) or 0
+        return na < nb
+    end)
     return out
+end
+
+local function islandOwnedByUser(island, uid)
+    if not island then return false end
+    local attr = island:GetAttribute("OccupyingPlayerId")
+    if attr ~= nil then
+        local n = (typeof(attr)=="string") and tonumber(attr) or attr
+        if typeof(n)=="number" and n == uid then return true end
+    end
+    -- เผื่อบางเกมไปเก็บไว้ใต้โหนดย่อย
+    for _,node in ipairs(island:GetDescendants()) do
+        if node.GetAttribute then
+            local v = node:GetAttribute("OccupyingPlayerId")
+            if v ~= nil then
+                local n = (typeof(v)=="string") and tonumber(v) or v
+                if typeof(n)=="number" and n == uid then return true end
+            end
+        end
+    end
+    return false
 end
 
 local function nearestIslandToCharacter()
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
-    local islands = listIslands()
     local best, bestDist = nil, math.huge
-    for _,island in ipairs(islands) do
+    for _,island in ipairs(listIslands()) do
         local cf = island:GetPivot()
         local dx = hrp.Position.X - cf.Position.X
         local dz = hrp.Position.Z - cf.Position.Z
-        local dist = math.sqrt(dx*dx + dz*dz)
+        local dist = dx*dx + dz*dz
         if dist < bestDist then best, bestDist = island, dist end
     end
     return best
@@ -111,43 +106,66 @@ end
 
 local function findIslandModel()
     local art = Workspace:FindFirstChild("Art")
-
-    -- A) ตรงชื่อจาก Attribute
-    local byName = getAssignedIslandNameAttr()
-    if art and byName and art:FindFirstChild(byName) then
-        return art[byName]
+    if not art then
+        dprint("ไม่พบ Workspace.Art")
+        return nil
     end
 
-    -- B) มีแทกรหัสผู้เล่นบนเกาะ (OccupyingPlayerId ฯลฯ)
+    -- A) ถ้ามี AssignedIslandName ให้ลองก่อน
+    local want = LocalPlayer:GetAttribute("AssignedIslandName")
+    if typeof(want)=="string" and #want>0 and art:FindFirstChild(want) then
+        dprint("ใช้ AssignedIslandName =", want)
+        return art[want]
+    end
+
+    -- B) ยึด OccupyingPlayerId
     local uid = LocalPlayer.UserId
     for _,island in ipairs(listIslands()) do
-        if islandOwnedByPlayer(island, uid) then
+        if islandOwnedByUser(island, uid) then
+            dprint("พบเกาะโดย OccupyingPlayerId →", island.Name)
             return island
         end
     end
 
-    -- C) ไม่เจออะไรเลย → เอาเกาะที่ใกล้ตัวละครที่สุด
-    return nearestIslandToCharacter()
+    -- C) ใกล้ที่สุด
+    local near = nearestIslandToCharacter()
+    if near then dprint("fallback ใกล้สุด →", near.Name) end
+    return near
 end
 
--- ===== เก็บช่อง Farm (Land/Water) ใต้เกาะ =====
+-- ===== collect farm tiles =====
+local function eachDescendant(root, cb)
+    for _,d in ipairs(root:GetDescendants()) do cb(d) end
+    for _,c in ipairs(root:GetChildren()) do cb(c) end -- เผื่ออยู่แค่ชั้นเดียว
+end
+
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
-    local root = island:FindFirstChild("Core") or island
-    local out  = {}
-    local pat  = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
-    for _,d in ipairs(root:GetDescendants()) do
+    -- ฟาร์มอาจอยู่ใต้ Core หรืออยู่ใต้เกาะเลย → สแกนทั้งเกาะ
+    local out = {}
+    local pat = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
+    eachDescendant(island, function(d)
         if d:IsA("BasePart") and d.Name:match(pat) then
             out[#out+1] = d
         end
+    end)
+    if DEBUG then
+        dprint(isLand and "LAND parts" or "WATER parts", "พบ", #out)
+        for i=1, math.min(3, #out) do dprint("  •", out[i].Name) end
     end
     return out
 end
 
--- ===== Occupancy check ในกรอบ 8x14x8 (ไข่/สัตว์/ของวาง) =====
+-- ตรวจ “มีสัตว์/ไข่/ของวาง” บนช่อง
 local function tileOccupied(part)
     if not part then return false end
+    local centerCF = part.CFrame
+    local size = Vector3.new(8, 14, 8)
+
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    params.RespectCanCollide = false
 
     local include = {}
     local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
@@ -155,13 +173,9 @@ local function tileOccupied(part)
     if pbb  then table.insert(include, pbb)  end
     if pets then table.insert(include, pets) end
     if #include == 0 then include = { Workspace } end
-
-    local params = OverlapParams.new()
-    params.FilterType = Enum.RaycastFilterType.Include
     params.FilterDescendantsInstances = include
-    params.RespectCanCollide = false
 
-    local parts = Workspace:GetPartBoundsInBox(part.CFrame, Vector3.new(8,14,8), params)
+    local parts = Workspace:GetPartBoundsInBox(centerCF, size, params)
     if #parts == 0 then return false end
 
     local seen = {}
@@ -173,7 +187,8 @@ local function tileOccupied(part)
             or m:FindFirstChildWhichIsA("AnimationController", true)
             or m:GetAttribute("IsPet") or m:GetAttribute("PetType") or m:GetAttribute("T")
             or (pets and m:IsDescendantOf(pets))
-            or (pbb  and m:IsDescendantOf(pbb)) then
+            or (pbb  and m:IsDescendantOf(pbb))
+            then
                 return true
             end
         end
@@ -182,9 +197,8 @@ local function tileOccupied(part)
 end
 
 local function readFarmStatus()
-    local function count(kindIsLand)
-        local tiles  = collectFarmParts(kindIsLand)
-        local filled = 0
+    local function count(isLand)
+        local tiles, filled = collectFarmParts(isLand), 0
         for _,t in ipairs(tiles) do
             if tileOccupied(t) then filled += 1 end
         end
@@ -192,13 +206,18 @@ local function readFarmStatus()
     end
     local landFilled,  landTotal  = count(true)
     local waterFilled, waterTotal = count(false)
+
+    if DEBUG then
+        dprint(("สรุป Land: %d/%d | Water: %d/%d"):format(landFilled, landTotal, waterFilled, waterTotal))
+    end
+
     return {
         Land  = { filled = landFilled,  total = landTotal  },
         Water = { filled = waterFilled, total = waterTotal },
     }
 end
 
--- ===== 3) อ่านเงินรวม =====
+-- ===== 3) ยูทิลอ่าน "เงินรวม" =====
 local CURRENCY_CANDIDATES = { "Money","Cash","Coins","Gold","Gems" }
 local function toNumber(s)
     if typeof(s) == "number" then return s end
@@ -252,7 +271,7 @@ local function buildRoster()
     return list
 end
 
--- ===== 5) Egg Inventory (จาก PlayerGui.Data.Egg) =====
+-- ===== 5) Egg Inventory =====
 local function readEggs()
     local pg = LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return {} end
     local data = pg:FindFirstChild("Data");            if not data then return {} end
@@ -268,7 +287,7 @@ local function readEggs()
     return list
 end
 
--- ===== 6) สร้าง roomName =====
+-- ===== 6) ชื่อห้อง =====
 local function makeRoomName()
     local placeName
     local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
@@ -276,7 +295,7 @@ local function makeRoomName()
     return (placeName or ("Place " .. tostring(game.PlaceId))) .. " • " .. string.sub(game.JobId, 1, 8)
 end
 
--- ===== 7) Nexus (lite) — WS Manager =====
+-- ===== 7) WS Manager =====
 local Nexus = { Host = "localhost:3005", Path = "/Nexus", IsConnected = false, Socket = nil }
 function Nexus:Send(Name, Payload)
     if not (self.Socket and self.IsConnected) then return end
@@ -293,7 +312,7 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- ===== 8) ตัวจัดการข้อความเข้า (รองรับ Exec/Echo) =====
+-- ===== 8) onMessage (Exec/Echo) =====
 local function onSocketMessage(self, raw)
     if type(raw) ~= "string" then local okc, s = pcall(tostring, raw); raw = okc and s or "" end
     if raw == "ping" then return end
@@ -424,7 +443,7 @@ function Nexus:Stop()
     if self.Socket then pcall(function() self.Socket:Close() end) end
 end
 
--- ===== 10) Hooks เล็กน้อย =====
+-- ===== 10) Hooks =====
 Players.PlayerAdded:Connect(function() task.wait(0.5) end)
 Players.PlayerRemoving:Connect(function() task.wait(0.5) end)
 LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.Started then Nexus:Stop() end end)
