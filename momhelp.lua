@@ -46,25 +46,106 @@ local function getCharacterSnapshot()
     }
 end
 
--- ===== Helpers: หาต้นเกาะ + ชุดช่องฟาร์ม (Land/Water) =====
-local function getAssignedIslandName() return LocalPlayer:GetAttribute("AssignedIslandName") end
-local function findIslandModel()
-    local art = Workspace:FindFirstChild("Art"); if not art then return nil end
-    local want = getAssignedIslandName()
-    if want and art:FindFirstChild(want) then return art[want] end
-    for _,m in ipairs(art:GetChildren()) do
-        if m:IsA("Model") and m.Name:match("^Island") then return m end
-    end
+-- ===== Robust island resolver (drop-in replacement) =====
+local Workspace = game:GetService("Workspace")
+local Players   = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- 1) ถ้ามี attribute ตรง ๆ ให้ใช้ก่อน
+local function getAssignedIslandNameAttr()
+    local v = LocalPlayer:GetAttribute("AssignedIslandName")
+    if typeof(v) == "string" and #v > 0 then return v end
     return nil
 end
 
+-- 2) ตัวช่วยสแกน “ร่องรอยเจ้าของ” ในเกาะ
+local OWNER_KEYS = {
+    "UserId","OwnerId","Owner","AssignedUserId","IslandUserId","PlayerUserId"
+}
+local function anyEqualsUserId(inst, userId)
+    for _,key in ipairs(OWNER_KEYS) do
+        local val = inst and inst.GetAttribute and inst:GetAttribute(key)
+        if val ~= nil then
+            local n = (typeof(val) == "string") and tonumber(val) or val
+            if typeof(n) == "number" and n == userId then return true end
+        end
+        local v2 = (inst and inst:FindFirstChild(key))
+        if v2 and v2:IsA("IntValue") and v2.Value == userId then return true end
+    end
+    return false
+end
+
+local function islandOwnedByPlayer(islandModel, userId)
+    if not islandModel then return false end
+    if anyEqualsUserId(islandModel, userId) then return true end
+    -- เผื่อเกมเก็บไว้ใต้ ENV/SPEC/Core อื่น ๆ
+    for _,child in ipairs(islandModel:GetDescendants()) do
+        if anyEqualsUserId(child, userId) then return true end
+    end
+    return false
+end
+
+-- 3) ค้นหารายชื่อเกาะทั้งหมด
+local function listIslands()
+    local art = Workspace:FindFirstChild("Art")
+    if not art then return {} end
+    local out = {}
+    for _,m in ipairs(art:GetChildren()) do
+        if m:IsA("Model") and m.Name:match("^Island[_%-]?%d+$") then
+            table.insert(out, m)
+        end
+    end
+    return out
+end
+
+-- 4) หาเกาะจากความใกล้ (ถ้าไม่มีร่องรอยเจ้าของ)
+local function nearestIslandToCharacter()
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local islands = listIslands()
+    local best, bestDist = nil, math.huge
+    for _,island in ipairs(islands) do
+        local cf, size = island:GetBoundingBox()
+        -- ระยะราบ (XZ) ถึงศูนย์กลางเกาะ
+        local dx = hrp.Position.X - cf.Position.X
+        local dz = hrp.Position.Z - cf.Position.Z
+        local dist = math.sqrt(dx*dx + dz*dz)
+        if dist < bestDist then
+            best, bestDist = island, dist
+        end
+    end
+    return best
+end
+
+-- 5) ตัวหาเกาะหลัก (รวม 3 วิธี)
+local function findIslandModel()
+    -- A) จาก Attribute ชื่อเกาะ
+    local art = Workspace:FindFirstChild("Art")
+    local byName = getAssignedIslandNameAttr()
+    if art and byName and art:FindFirstChild(byName) then
+        return art[byName]
+    end
+
+    -- B) จากร่องรอยเจ้าของ
+    local uid = LocalPlayer.UserId
+    for _,island in ipairs(listIslands()) do
+        if islandOwnedByPlayer(island, uid) then
+            return island
+        end
+    end
+
+    -- C) จากความใกล้ตัวละคร
+    return nearestIslandToCharacter()
+end
+
+-- 6) รวบรวมช่อง Farm (Land/Water) ใต้เกาะที่หาได้
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
-    -- ตามรูป ฟาร์มอยู่ใต้ Core; เผื่อบางแผนไม่มี Core ให้สแกนทั้งเกาะ
     local root = island:FindFirstChild("Core") or island
     local out  = {}
-    local pat  = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
+    local pat  = isLand and "^Farm_split_%d+_%d+_%d+$"
+                         or "^WaterFarm_split_%d+_%d+_%d+$"
     for _,d in ipairs(root:GetDescendants()) do
         if d:IsA("BasePart") and d.Name:match(pat) then
             out[#out+1] = d
@@ -72,6 +153,7 @@ local function collectFarmParts(isLand)
     end
     return out
 end
+
 
 -- ตรวจ “มีสัตว์/ไข่/ของวาง” ทับช่องนี้ไหม (ใช้ทั้ง Overlap และตรวจกลุ่มโฟลเดอร์สำคัญ)
 local function tileOccupied(part)
@@ -366,3 +448,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
