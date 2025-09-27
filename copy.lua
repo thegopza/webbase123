@@ -1,19 +1,76 @@
 --[[ =======================
-       Build A Zoo — Auto Gift
+       Build A Zoo — Auto Gift (with auto-approach)
      ======================= ]]
 
 -- Services
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-
 local LocalPlayer = Players.LocalPlayer
 
--- === Helper: อ่านคลังไข่จาก PlayerGui.Data.Egg ===
+-- === Helpers: Player & movement ===
+local function getHRP(plr)
+    plr = plr or LocalPlayer
+    local ch = plr and plr.Character
+    return ch and ch:FindFirstChild("HumanoidRootPart"), ch and ch:FindFirstChildOfClass("Humanoid")
+end
+
+local function distanceBetween(a, b)
+    return (a - b).Magnitude
+end
+
+-- เดินไปใกล้เป้าหมายจนเข้าเกณฑ์ maxDist (พยายามภายใน timeout วินาที)
+local function approachTarget(targetPlr, maxDist, timeout)
+    maxDist = maxDist or 7      -- เกณฑ์ระยะปลอดภัย
+    timeout = timeout or 6      -- เวลาสูงสุดต่อความพยายาม
+    local myHRP, hum = getHRP(LocalPlayer)
+    local tgHRP = getHRP(targetPlr)
+    if not (myHRP and hum and tgHRP) then return false, "missing HRP/Humanoid" end
+
+    -- ถ้าใกล้อยู่แล้ว ไม่ต้องเดิน
+    if distanceBetween(myHRP.Position, tgHRP.Position) <= maxDist then
+        return true
+    end
+
+    local started = os.clock()
+    -- ให้ไปยืนห่างหน้าเป้าหมาย ~2 stud
+    local dest = tgHRP.Position + (myHRP.Position - tgHRP.Position).Unit * 2
+    hum:MoveTo(dest)
+
+    repeat
+        task.wait(0.1)
+        local okNear = distanceBetween((getHRP(LocalPlayer) or myHRP).Position, (getHRP(targetPlr) or tgHRP).Position) <= maxDist
+        if okNear then return true end
+    until (os.clock() - started) > timeout
+
+    -- แผนสำรอง: เทเลพอร์ตไปจุดหน้าเป้าหมาย 1.5 stud (บาง executor อาจไม่อนุญาต ข้ามได้)
+    local hrpNow = (getHRP(LocalPlayer) or myHRP)
+    local tgNow = (getHRP(targetPlr) or tgHRP)
+    if hrpNow and tgNow then
+        pcall(function()
+            hrpNow.CFrame = CFrame.new(tgNow.Position + (hrpNow.Position - tgNow.Position).Unit * 1.5, tgNow.Position)
+        end)
+        task.wait(0.1)
+        if distanceBetween(hrpNow.Position, tgNow.Position) <= maxDist + 1 then
+            return true
+        end
+    end
+    return false, "cannot get close enough"
+end
+
+-- === Helpers: อ่านคลังไข่จาก PlayerGui.Data.Egg ===
 local function _getEggFolder()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     return data and data:FindFirstChild("Egg") or nil
+end
+
+-- normalize mutation ให้ Dino/Jurassic เท่ากัน
+local function normalizeMut(m)
+    if not m then return nil end
+    m = tostring(m)
+    if m == "Jurassic" then return "Dino" end
+    return m
 end
 
 local function listEggsFiltered(typeFilterSet, mutFilterSet, limitCount)
@@ -22,16 +79,15 @@ local function listEggsFiltered(typeFilterSet, mutFilterSet, limitCount)
     if not eg then return list end
 
     for _, ch in ipairs(eg:GetChildren()) do
-        -- ใช้ได้เมื่อเป็นไข่พร้อมส่ง (ไม่มี subfolder)
         if #ch:GetChildren() == 0 then
             local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
-            local M = ch:GetAttribute("M") or ch:GetAttribute("Mutate")
-            if M == "Dino" then M = "Jurassic" end
+            local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
+            -- (รองรับ Snow และ Dino แบบตรง ๆ อยู่แล้ว)
 
             local okType = (not typeFilterSet) or (next(typeFilterSet) == nil) or typeFilterSet[tostring(T)]
             local okMut  = (not mutFilterSet)  or (next(mutFilterSet)  == nil) or mutFilterSet[tostring(M or "")]
             if okType and okMut then
-                table.insert(list, { uid = ch.Name, T = tostring(T), M = M and tostring(M) or nil })
+                table.insert(list, { uid = ch.Name, T = tostring(T), M = M })
                 if limitCount and #list >= limitCount then break end
             end
         end
@@ -39,9 +95,8 @@ local function listEggsFiltered(typeFilterSet, mutFilterSet, limitCount)
     return list
 end
 
--- === Helper: ใส่ไข่เข้ามือ (สล๊อต 2) ===
+-- === ใส่ไข่เข้ามือ (สล๊อต 2) ===
 local function holdEgg(uid)
-    -- ใส่ค่า Deploy.S2 เป็น "Egg_<UID>" จากนั้นกดปุ่ม 2
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
@@ -54,7 +109,7 @@ local function holdEgg(uid)
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Two, false, game)
 end
 
--- === Core: ส่งของผ่าน Remote ===
+-- === Core Gift ===
 local GiftRE = ReplicatedStorage:WaitForChild("Remote"):WaitForChild("GiftRE")
 
 local function giftOnce(targetPlayer, eggUID)
@@ -65,21 +120,28 @@ local function giftOnce(targetPlayer, eggUID)
         return false, "No egg UID"
     end
 
-    -- Equip egg to hand
+    -- 1) เดินให้เข้าใกล้ก่อน (แก้ปัญหาอยู่ไกลไม่ส่ง)
+    local nearOk, why = approachTarget(targetPlayer, 7, 6)
+    if not nearOk then
+        return false, "not near target: " .. tostring(why)
+    end
+
+    -- 2) ถือไข่ไว้ในมือ
     holdEgg(eggUID)
     task.wait(0.15)
 
-    -- พยายามยิง Remote ตรง (จาก sniff: Args = [Instance<Player>])
+    -- 3) ยิง Remote
     local ok, err = pcall(function()
         GiftRE:FireServer(targetPlayer)
     end)
     if not ok then
-        return false, ("GiftRE failed: %s"):format(tostring(err))
+        -- ลองขยับเข้าไปอีกนิดแล้วซ้ำ 1 ครั้ง
+        approachTarget(targetPlayer, 5, 2)
+        ok = pcall(function() GiftRE:FireServer(targetPlayer) end)
     end
 
-    -- หน่วงเล็กน้อยให้เซิร์ฟเวอร์ตัดไข่ออกจากคลังก่อนสั่งชิ้นต่อไป
     task.wait(0.25)
-    return true
+    return ok == true
 end
 
 -- ========== WindUI (สร้างถ้ายังไม่มี) ==========
@@ -107,19 +169,13 @@ if WindUI and WindUI.CreateWindow then
     Tabs.MainSection = (Window.Section and Window:Section({ Title = "🎁 Gift Tools", Opened = true })) or nil
 end
 
--- ถ้าโปรเจ็กต์เดิมของคุณมีตัวแปร Tabs อยู่แล้ว (จากสคริปต์ใหญ่)
--- จะลอง reuse แทน
-local RootSection = (Tabs and Tabs.MainSection) or (Window and Window) -- ตกลงใช้ window
-
-local GiftTab
-if RootSection and RootSection.Tab then
-    GiftTab = RootSection:Tab({ Title = "🎁 | Gift" })
-end
+local RootSection = (Tabs and Tabs.MainSection) or (Window and Window)
+local GiftTab = RootSection and RootSection.Tab and RootSection:Tab({ Title = "🎁 | Gift" }) or nil
 
 -- ===== UI State =====
 local selectedTargetName = nil
-local selectedTypes = {}     -- set: { ["UltraEgg"]=true, ... }
-local selectedMuts  = {}     -- set: { ["Golden"]=true, ... }
+local selectedTypes = {}
+local selectedMuts  = {}
 local giftAmount    = 1
 local autoGiftOn    = false
 local autoGiftThread
@@ -134,7 +190,6 @@ local function buildPlayerList()
     return arr
 end
 
--- === คีย์ช่วย ===
 local function makeSetFromArray(arr)
     local s = {}
     for _, v in ipairs(arr or {}) do s[tostring(v)] = true end
@@ -163,7 +218,6 @@ if GiftTab then
         end
     })
 
-    -- Type & Mutation อ้างอิงจากของที่คุณมีในเกมจริง (อ่านสดจาก Data.Egg)
     GiftTab:Dropdown({
         Title = "🥚 Types (multi)",
         Desc  = "ว่างไว้ = ทุกประเภท",
@@ -173,16 +227,21 @@ if GiftTab then
         Callback = function(arr) selectedTypes = makeSetFromArray(arr) end
     })
 
+    -- เพิ่ม Snow และ Dino (และรองรับ Jurassic เป็น alias ของ Dino)
     GiftTab:Dropdown({
         Title = "🧬 Mutations (multi)",
-        Desc  = "ว่างไว้ = ทุกชนิดกลายพันธุ์",
-        Values = {"Golden","Diamond","Electric","Fire","Jurassic"},
+        Desc  = "ว่างไว้ = ทุกชนิด",
+        Values = {"Golden","Diamond","Electric","Fire","Snow","Dino"},
         Multi = true,
         AllowNone = true,
-        Callback = function(arr) selectedMuts = makeSetFromArray(arr) end
+        Callback = function(arr)
+            selectedMuts = makeSetFromArray(arr)
+            -- เผื่อ UI อื่นยังใช้ Jurassic อยู่ ให้ map เข้า Dino ด้วย
+            if selectedMuts["Dino"] then selectedMuts["Jurassic"] = true end
+        end
     })
 
-    local amountInput = GiftTab:Input({
+    GiftTab:Input({
         Title = "จำนวนที่จะ Gift",
         Desc  = "เช่น 1, 5, 10",
         Value = "1",
@@ -212,8 +271,8 @@ if GiftTab then
     })
 
     GiftTab:Toggle({
-        Title = "🤖 Auto Gift (วนตามจำนวน)",
-        Desc  = "จะส่งตามจำนวนที่ตั้งไว้โดยใช้ตัวกรอง",
+        Title = "🤖 Auto Gift (เข้าใกล้ + ส่งซ้ำ)",
+        Desc  = "จะเดินเข้าไปใกล้ก่อน แล้วส่งตามจำนวนที่ตั้งไว้",
         Value = false,
         Callback = function(state)
             autoGiftOn = state
@@ -221,9 +280,8 @@ if GiftTab then
                 autoGiftThread = task.spawn(function()
                     while autoGiftOn do
                         local target = selectedTargetName and Players:FindFirstChild(selectedTargetName)
-                        if not target then
-                            task.wait(0.5); continue
-                        end
+                        if not target then task.wait(0.5) continue end
+
                         local toSend = giftAmount
                         while autoGiftOn and toSend > 0 do
                             local eggs = listEggsFiltered(selectedTypes, selectedMuts, 1)
@@ -232,22 +290,21 @@ if GiftTab then
                             if ok then
                                 toSend -= 1
                             else
-                                -- ถ้าส่งไม่ผ่าน รอหน่อย
-                                task.wait(0.3)
+                                -- ส่งไม่ผ่าน อาจเพราะระยะ/ยกของไม่ทัน รอสักนิดแล้วลองใหม่
+                                task.wait(0.4)
                             end
                         end
-                        -- ถ้าไข่หมด/ครบจำนวนแล้ว พักก่อนรอบถัดไป
                         task.wait(0.6)
                     end
                     autoGiftThread = nil
                 end)
-                WindUI:Notify({ Title="Auto Gift", Content="เริ่มทำงาน", Duration=2 })
+                WindUI:Notify({ Title="Auto Gift", Content="เริ่มทำงาน (จะเข้าใกล้เป้าหมายอัตโนมัติ)", Duration=3 })
             end
         end
     })
 end
 
--- ป้องกันกรณีไม่มี WindUI: สามารถเรียกใช้ฟังก์ชัน giftOnce เองได้
+-- ใช้แบบสคริปต์ล้วนก็ได้ (หากไม่เปิด UI)
 getgenv().GiftUtils = {
     List = function(typeSet, mutSet, limit) return listEggsFiltered(typeSet, mutSet, limit) end,
     Gift = function(targetName, uid)
