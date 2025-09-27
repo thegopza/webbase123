@@ -329,8 +329,8 @@ local function holdEgg(uid)
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
     if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
-    tap(Enum.KeyCode.One); task.wait(0.15)
-    tap(Enum.KeyCode.Two); task.wait(0.25)
+    tap(Enum.KeyCode.One); task.wait(0.50)
+    tap(Enum.KeyCode.Two); task.wait(0.50)
 end
 
 local function giftOnce(targetPlayer, eggUID)
@@ -343,7 +343,7 @@ local function giftOnce(targetPlayer, eggUID)
         holdEgg(eggUID)
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end)
     end
-    task.wait(0.22)
+    task.wait(0.50)
     return ok == true
 end
 
@@ -555,3 +555,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
