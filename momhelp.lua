@@ -133,23 +133,35 @@ local function findIslandModel()
     return near
 end
 
--- ===== collect farm tiles =====
-local function eachDescendant(root, cb)
-    for _,d in ipairs(root:GetDescendants()) do cb(d) end
-    for _,c in ipairs(root:GetChildren()) do cb(c) end -- เผื่ออยู่แค่ชั้นเดียว
-end
+-- ===== collect farm tiles (ป้องกันนับซ้ำ + ฟิลเตอร์ขนาด 8x8x8) =====
+local TILE_SIZE = Vector3.new(8,8,8)
 
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
-    -- ฟาร์มอาจอยู่ใต้ Core หรืออยู่ใต้เกาะเลย → สแกนทั้งเกาะ
-    local out = {}
-    local pat = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
-    eachDescendant(island, function(d)
-        if d:IsA("BasePart") and d.Name:match(pat) then
-            out[#out+1] = d
+
+    -- ฟาร์มอาจอยู่ใต้ Core หรืออยู่ใต้เกาะเลย → สแกนทั้งเกาะ (เฉพาะ GetDescendants)
+    local pat = isLand and "^Farm_split_%d+_%d+_%d+$"
+                         or "^WaterFarm_split_%d+_%d+_%d+$"
+
+    local out, seen = {}, {}
+
+    local function consider(inst)
+        if inst:IsA("BasePart") and inst.Name:match(pat) and inst.Size == TILE_SIZE then
+            if not seen[inst] then
+                seen[inst] = true
+                out[#out+1] = inst
+            end
         end
-    end)
+    end
+
+    -- ตรวจตัว island เอง (เผื่อวางไว้เป็นลูกตรง)
+    consider(island)
+    -- และลูก-หลานทั้งหมด (พอแล้ว ไม่ใช้ GetChildren ซ้ำ)
+    for _,d in ipairs(island:GetDescendants()) do
+        consider(d)
+    end
+
     if DEBUG then
         dprint(isLand and "LAND parts" or "WATER parts", "พบ", #out)
         for i=1, math.min(3, #out) do dprint("  •", out[i].Name) end
