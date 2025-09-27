@@ -1,71 +1,108 @@
---[[ =======================
-       Build A Zoo — Auto Gift (with auto-approach)
-     ======================= ]]
+-- Build A Zoo — Auto Gift (Target dropdown fixed + TP + batch + progress)
 
--- Services
+-- ====== Services ======
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
--- === Helpers: Player & movement ===
-local function getHRP(plr)
-    plr = plr or LocalPlayer
-    local ch = plr and plr.Character
-    return ch and ch:FindFirstChild("HumanoidRootPart"), ch and ch:FindFirstChildOfClass("Humanoid")
+-- Remote (ตามที่ sniff มา: ReplicatedStorage.Remote.GiftRE)
+local GiftRE = ReplicatedStorage:WaitForChild("Remote"):WaitForChild("GiftRE")
+
+-- ====== Load WindUI (fallback มินิ UI ถ้าโหลดไม่ได้) ======
+local function loadWindUI()
+    local ok, src = pcall(function()
+        return game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua")
+    end)
+    if not ok then return nil end
+    local loader = (loadstring or load)
+    if type(loader) ~= "function" then return nil end
+    local ok2, fn = pcall(loader, src); if not ok2 then return nil end
+    local ok3, lib = pcall(fn); if not ok3 then return nil end
+    return lib
 end
 
-local function distanceBetween(a, b)
-    return (a - b).Magnitude
-end
-
--- เดินไปใกล้เป้าหมายจนเข้าเกณฑ์ maxDist (พยายามภายใน timeout วินาที)
-local function approachTarget(targetPlr, maxDist, timeout)
-    maxDist = maxDist or 7      -- เกณฑ์ระยะปลอดภัย
-    timeout = timeout or 6      -- เวลาสูงสุดต่อความพยายาม
-    local myHRP, hum = getHRP(LocalPlayer)
-    local tgHRP = getHRP(targetPlr)
-    if not (myHRP and hum and tgHRP) then return false, "missing HRP/Humanoid" end
-
-    -- ถ้าใกล้อยู่แล้ว ไม่ต้องเดิน
-    if distanceBetween(myHRP.Position, tgHRP.Position) <= maxDist then
-        return true
+local function miniUI()
+    local g=Instance.new("ScreenGui", game:GetService("CoreGui")); g.Name="GiftMiniUI"; g.ResetOnSpawn=false
+    local f=Instance.new("Frame", g); f.Position=UDim2.fromOffset(20,180); f.Size=UDim2.fromOffset(360,280)
+    f.BackgroundColor3=Color3.fromRGB(28,28,28); f.BorderSizePixel=0
+    local y=6
+    local function line(txt)
+        local t=Instance.new("TextLabel",f); t.BackgroundTransparency=1; t.Font=Enum.Font.GothamBold
+        t.TextColor3=Color3.new(1,1,1); t.TextSize=14; t.TextXAlignment=Enum.TextXAlignment.Left
+        t.Position=UDim2.fromOffset(8,y); t.Size=UDim2.new(1,-16,0,18); t.Text=txt; y=y+20
     end
+    local API={}
+    function API:CreateWindow() return self end
+    function API:Section() return self end
+    function API:Tab() return self end
+    function API:Dropdown(o)
+        line("• "..(o.Title or "Dropdown"))
+        local d={_vals=o.Values or {}, _sel=nil}
+        function d:GetValue() return self._sel end
+        function d:SetValues(v) self._vals=v end
+        function d:SetList(v) self._vals=v end
+        function d:Set(v) self._sel=v if o.Callback then o.Callback(v) end end
+        return d
+    end
+    function API:Input(o) line("• "..(o.Title or "Input")); return { Set=function(_,v) if o.Callback then o.Callback(v) end end } end
+    function API:Button(o) line("• "..(o.Title or "Button").." (click by code)")
+        return { Click=function() if o.Callback then o.Callback() end end }
+    end
+    function API:Paragraph(o)
+        local t=Instance.new("TextLabel",f); t.BackgroundTransparency=1; t.Font=Enum.Font.Gotham; t.TextWrapped=true
+        t.TextXAlignment=Enum.TextXAlignment.Left; t.TextColor3=Color3.fromRGB(230,230,230); t.TextSize=13
+        t.Position=UDim2.fromOffset(8,y); t.Size=UDim2.new(1,-16,1,-y-8); t.Text=o.Desc or ""
+        return { SetDesc=function(_,d) t.Text=d end, Set=function(_,d) t.Text=d end, SetText=function(_,d) t.Text=d end }
+    end
+    function API:EditOpenButton() end
+    function API:Notify() end
+    return API
+end
 
-    local started = os.clock()
-    -- ให้ไปยืนห่างหน้าเป้าหมาย ~2 stud
-    local dest = tgHRP.Position + (myHRP.Position - tgHRP.Position).Unit * 2
-    hum:MoveTo(dest)
+local WindUI = loadWindUI() or miniUI()
 
-    repeat
-        task.wait(0.1)
-        local okNear = distanceBetween((getHRP(LocalPlayer) or myHRP).Position, (getHRP(targetPlr) or tgHRP).Position) <= maxDist
-        if okNear then return true end
-    until (os.clock() - started) > timeout
+-- ====== Window / Tab ======
+local Window = WindUI:CreateWindow({ Title="Build A Zoo", Icon="gift", IconThemed=true, Author="Zebux" })
+local Sec    = Window:Section({ Title="🎁 Gift Tools", Opened=true })
+local Tab    = Sec:Tab({ Title="🎁 | Gift" })
 
-    -- แผนสำรอง: เทเลพอร์ตไปจุดหน้าเป้าหมาย 1.5 stud (บาง executor อาจไม่อนุญาต ข้ามได้)
-    local hrpNow = (getHRP(LocalPlayer) or myHRP)
-    local tgNow = (getHRP(targetPlr) or tgHRP)
-    if hrpNow and tgNow then
-        pcall(function()
-            hrpNow.CFrame = CFrame.new(tgNow.Position + (hrpNow.Position - tgNow.Position).Unit * 1.5, tgNow.Position)
-        end)
-        task.wait(0.1)
-        if distanceBetween(hrpNow.Position, tgNow.Position) <= maxDist + 1 then
-            return true
+-- ====== Helpers ======
+local function getHRP(plr) local c=plr and plr.Character return c and c:FindFirstChild("HumanoidRootPart") end
+
+local function nearestOtherPlayer()
+    local my = getHRP(LocalPlayer); if not my then return nil end
+    local best,bd = nil,1e9
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local hrp = getHRP(p)
+            if hrp then
+                local d = (hrp.Position - my.Position).Magnitude
+                if d < bd then bd = d; best = p end
+            end
         end
     end
-    return false, "cannot get close enough"
+    return best
 end
 
--- === Helpers: อ่านคลังไข่จาก PlayerGui.Data.Egg ===
-local function _getEggFolder()
+local function teleportToTarget(target, offset)
+    offset = offset or 1.6
+    local my = getHRP(LocalPlayer); local tg = getHRP(target)
+    if not (my and tg) then return false end
+    -- ป้องกันยืนซ้อนตัว
+    local dir = (my.Position - tg.Position)
+    if dir.Magnitude < 0.1 then dir = Vector3.new(1,0,0) end
+    my.CFrame = CFrame.new(tg.Position + dir.Unit*offset, tg.Position)
+    task.wait(0.08)
+    return true
+end
+
+local function EggFolder()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     return data and data:FindFirstChild("Egg") or nil
 end
 
--- normalize mutation ให้ Dino/Jurassic เท่ากัน
 local function normalizeMut(m)
     if not m then return nil end
     m = tostring(m)
@@ -73,243 +110,161 @@ local function normalizeMut(m)
     return m
 end
 
-local function listEggsFiltered(typeFilterSet, mutFilterSet, limitCount)
-    local eg = _getEggFolder()
-    local list = {}
-    if not eg then return list end
-
-    for _, ch in ipairs(eg:GetChildren()) do
-        if #ch:GetChildren() == 0 then
-            local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
-            local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
-            -- (รองรับ Snow และ Dino แบบตรง ๆ อยู่แล้ว)
-
-            local okType = (not typeFilterSet) or (next(typeFilterSet) == nil) or typeFilterSet[tostring(T)]
-            local okMut  = (not mutFilterSet)  or (next(mutFilterSet)  == nil) or mutFilterSet[tostring(M or "")]
-            if okType and okMut then
-                table.insert(list, { uid = ch.Name, T = tostring(T), M = M })
-                if limitCount and #list >= limitCount then break end
+local function listEggsFiltered(typeSet, mutSet, limit)
+    local eg = EggFolder(); local out = {}
+    if not eg then return out end
+    for _,ch in ipairs(eg:GetChildren()) do
+        if #ch:GetChildren()==0 then
+            local T=tostring(ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name)
+            local M=normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
+            local okT = (not typeSet) or (next(typeSet)==nil) or typeSet[T]
+            local okM = (not mutSet)  or (next(mutSet)==nil)  or mutSet[tostring(M or "")]
+            if okT and okM then
+                table.insert(out,{uid=ch.Name,T=T,M=M})
+                if limit and #out>=limit then break end
             end
         end
     end
-    return list
+    return out
 end
 
--- === ใส่ไข่เข้ามือ (สล๊อต 2) ===
 local function holdEgg(uid)
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
-    if deploy then
-        deploy:SetAttribute("S2", "Egg_" .. uid)
-    end
+    if deploy then deploy:SetAttribute("S2","Egg_"..uid) end
     task.wait(0.05)
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Two, false, game)
-    task.wait(0.05)
+    task.wait(0.04)
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Two, false, game)
 end
 
--- === Core Gift ===
-local GiftRE = ReplicatedStorage:WaitForChild("Remote"):WaitForChild("GiftRE")
-
-local function giftOnce(targetPlayer, eggUID)
-    if not targetPlayer or not targetPlayer.Parent then
-        return false, "Invalid target"
-    end
-    if not eggUID then
-        return false, "No egg UID"
-    end
-
-    -- 1) เดินให้เข้าใกล้ก่อน (แก้ปัญหาอยู่ไกลไม่ส่ง)
-    local nearOk, why = approachTarget(targetPlayer, 7, 6)
-    if not nearOk then
-        return false, "not near target: " .. tostring(why)
-    end
-
-    -- 2) ถือไข่ไว้ในมือ
-    holdEgg(eggUID)
-    task.wait(0.15)
-
-    -- 3) ยิง Remote
-    local ok, err = pcall(function()
-        GiftRE:FireServer(targetPlayer)
-    end)
-    if not ok then
-        -- ลองขยับเข้าไปอีกนิดแล้วซ้ำ 1 ครั้ง
-        approachTarget(targetPlayer, 5, 2)
-        ok = pcall(function() GiftRE:FireServer(targetPlayer) end)
-    end
-
-    task.wait(0.25)
-    return ok == true
+local function giftOnce(target, egg)
+    teleportToTarget(target, 1.6)
+    holdEgg(egg.uid)
+    task.wait(0.06)
+    local ok, err = pcall(function() GiftRE:FireServer(target) end)
+    if not ok then warn("[Gift] FireServer error: ", err) end
+    task.wait(0.16) -- เว้นจังหวะเครือข่าย/แอนิเมชัน
+    return ok
 end
 
--- ========== WindUI (สร้างถ้ายังไม่มี) ==========
-local WindUI = rawget(getfenv(0), "WindUI")
-if not WindUI then
-    local ok, lib = pcall(function()
-        return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
-    end)
-    if ok and lib then WindUI = lib end
-end
+local function toSet(arr) local s={} for _,v in ipairs(arr or {}) do s[tostring(v)]=true end return s end
 
-local Window, Tabs
-if WindUI and WindUI.CreateWindow then
-    Window = Window or WindUI:CreateWindow({
-        Title = "Build A Zoo",
-        Icon = "gift",
-        IconThemed = true,
-        Author = "Zebux",
-        Folder = "Zebux",
-        Size = UDim2.fromOffset(520, 360),
-        Transparent = true,
-        Theme = "Dark",
-    })
-    Tabs = Tabs or {}
-    Tabs.MainSection = (Window.Section and Window:Section({ Title = "🎁 Gift Tools", Opened = true })) or nil
-end
-
-local RootSection = (Tabs and Tabs.MainSection) or (Window and Window)
-local GiftTab = RootSection and RootSection.Tab and RootSection:Tab({ Title = "🎁 | Gift" }) or nil
-
--- ===== UI State =====
-local selectedTargetName = nil
+-- ====== UI State ======
+local selectedTargetName = nil   -- หรือ "[Nearest]"
 local selectedTypes = {}
 local selectedMuts  = {}
-local giftAmount    = 1
-local autoGiftOn    = false
-local autoGiftThread
+local amountStr     = ""
 
--- === สร้างรายการผู้เล่น ===
-local function buildPlayerList()
-    local arr = {}
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then table.insert(arr, plr.Name) end
+-- รายชื่อผู้เล่น (มีค่าเริ่ม รวม [Nearest])
+local function playerNameList()
+    local list = {"[Nearest]"}
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(list, p.Name) end
     end
-    table.sort(arr)
-    return arr
+    table.sort(list, function(a,b)
+        if a=="[Nearest]" then return true end
+        if b=="[Nearest]" then return false end
+        return a<b
+    end)
+    return list
 end
 
-local function makeSetFromArray(arr)
-    local s = {}
-    for _, v in ipairs(arr or {}) do s[tostring(v)] = true end
-    return s
+-- Target dropdown (สร้างพร้อมค่าเริ่มเลย)
+local targetDD = Tab:Dropdown({
+    Title  = "🎯 Target Player",
+    Values = playerNameList(),
+    Multi  = false,
+    Callback = function(v) selectedTargetName = v end
+})
+
+local function refreshPlayers()
+    local names = playerNameList()
+    if targetDD.SetValues then targetDD:SetValues(names)
+    elseif targetDD.SetList then targetDD:SetList(names)
+    elseif targetDD.Set then targetDD:Set(names) end
 end
+Players.PlayerAdded:Connect(refreshPlayers)
+Players.PlayerRemoving:Connect(refreshPlayers)
 
--- === UI ===
-if GiftTab then
-    GiftTab:Section({ Title = "🎁 Auto Gift", Icon = "gift" })
+Tab:Button({ Title="🔄 Refresh Players", Callback=refreshPlayers })
 
-    local targetDropdown = GiftTab:Dropdown({
-        Title = "🎯 Target Player",
-        Desc  = "เลือกผู้รับของ",
-        Values = buildPlayerList(),
-        Value  = nil,
-        Multi  = false,
-        Callback = function(v) selectedTargetName = v end
-    })
+Tab:Dropdown({
+    Title="🥚 Types (multi) – เว้นว่าง=ทั้งหมด",
+    Values={"BasicEgg","RareEgg","SuperRareEgg","EpicEgg","LegendEgg","PrismaticEgg","HyperEgg",
+            "VoidEgg","BowserEgg","DemonEgg","BoneDragonEgg","UltraEgg","DinoEgg","FlyEgg","UnicornEgg","AncientEgg"},
+    Multi=true, AllowNone=true,
+    Callback=function(arr) selectedTypes = toSet(arr) end
+})
 
-    GiftTab:Button({
-        Title = "🔄 Refresh Player List",
-        Callback = function()
-            if targetDropdown and targetDropdown.SetList then
-                targetDropdown:SetList(buildPlayerList())
-            end
-        end
-    })
-
-    GiftTab:Dropdown({
-        Title = "🥚 Types (multi)",
-        Desc  = "ว่างไว้ = ทุกประเภท",
-        Values = {"BasicEgg","RareEgg","SuperRareEgg","EpicEgg","LegendEgg","PrismaticEgg","HyperEgg","VoidEgg","BowserEgg","DemonEgg","BoneDragonEgg","UltraEgg","DinoEgg","FlyEgg","UnicornEgg","AncientEgg"},
-        Multi = true,
-        AllowNone = true,
-        Callback = function(arr) selectedTypes = makeSetFromArray(arr) end
-    })
-
-    -- เพิ่ม Snow และ Dino (และรองรับ Jurassic เป็น alias ของ Dino)
-    GiftTab:Dropdown({
-        Title = "🧬 Mutations (multi)",
-        Desc  = "ว่างไว้ = ทุกชนิด",
-        Values = {"Golden","Diamond","Electric","Fire","Snow","Dino"},
-        Multi = true,
-        AllowNone = true,
-        Callback = function(arr)
-            selectedMuts = makeSetFromArray(arr)
-            -- เผื่อ UI อื่นยังใช้ Jurassic อยู่ ให้ map เข้า Dino ด้วย
-            if selectedMuts["Dino"] then selectedMuts["Jurassic"] = true end
-        end
-    })
-
-    GiftTab:Input({
-        Title = "จำนวนที่จะ Gift",
-        Desc  = "เช่น 1, 5, 10",
-        Value = "1",
-        Callback = function(v)
-            giftAmount = math.max(1, tonumber(v) or 1)
-        end
-    })
-
-    GiftTab:Button({
-        Title = "🎁 Gift หนึ่งครั้ง (ตามตัวกรอง)",
-        Callback = function()
-            local target = selectedTargetName and Players:FindFirstChild(selectedTargetName)
-            if not target then
-                WindUI:Notify({ Title="Gift", Content="ยังไม่เลือกผู้รับ", Duration=2 }); return
-            end
-            local eggs = listEggsFiltered(selectedTypes, selectedMuts, 1)
-            if #eggs == 0 then
-                WindUI:Notify({ Title="Gift", Content="ไม่พบไข่ตรงเงื่อนไข", Duration=2 }); return
-            end
-            local ok, err = giftOnce(target, eggs[1].uid)
-            WindUI:Notify({
-                Title="Gift",
-                Content = ok and ("ส่งแล้ว: "..eggs[1].T..(eggs[1].M and (" • "..eggs[1].M) or "")) or ("ล้มเหลว: "..tostring(err)),
-                Duration=3
-            })
-        end
-    })
-
-    GiftTab:Toggle({
-        Title = "🤖 Auto Gift (เข้าใกล้ + ส่งซ้ำ)",
-        Desc  = "จะเดินเข้าไปใกล้ก่อน แล้วส่งตามจำนวนที่ตั้งไว้",
-        Value = false,
-        Callback = function(state)
-            autoGiftOn = state
-            if state and not autoGiftThread then
-                autoGiftThread = task.spawn(function()
-                    while autoGiftOn do
-                        local target = selectedTargetName and Players:FindFirstChild(selectedTargetName)
-                        if not target then task.wait(0.5) continue end
-
-                        local toSend = giftAmount
-                        while autoGiftOn and toSend > 0 do
-                            local eggs = listEggsFiltered(selectedTypes, selectedMuts, 1)
-                            if #eggs == 0 then break end
-                            local ok = giftOnce(target, eggs[1].uid)
-                            if ok then
-                                toSend -= 1
-                            else
-                                -- ส่งไม่ผ่าน อาจเพราะระยะ/ยกของไม่ทัน รอสักนิดแล้วลองใหม่
-                                task.wait(0.4)
-                            end
-                        end
-                        task.wait(0.6)
-                    end
-                    autoGiftThread = nil
-                end)
-                WindUI:Notify({ Title="Auto Gift", Content="เริ่มทำงาน (จะเข้าใกล้เป้าหมายอัตโนมัติ)", Duration=3 })
-            end
-        end
-    })
-end
-
--- ใช้แบบสคริปต์ล้วนก็ได้ (หากไม่เปิด UI)
-getgenv().GiftUtils = {
-    List = function(typeSet, mutSet, limit) return listEggsFiltered(typeSet, mutSet, limit) end,
-    Gift = function(targetName, uid)
-        local target = Players:FindFirstChild(targetName or "")
-        if not target then return false, "No target" end
-        return giftOnce(target, uid)
+Tab:Dropdown({
+    Title="🧬 Mutations (multi) – เว้นว่าง=ทั้งหมด",
+    Values={"Golden","Diamond","Electric","Fire","Snow","Dino"},
+    Multi=true, AllowNone=true,
+    Callback=function(arr)
+        selectedMuts = toSet(arr)
+        if selectedMuts["Dino"] then selectedMuts["Jurassic"]=true end
     end
-}
+})
+
+Tab:Input({
+    Title="จำนวนที่จะ Gift (เว้นว่าง/0 = ทั้งหมด)",
+    Value="",
+    Callback=function(v) amountStr = tostring(v or "") end
+})
+
+local progress = Tab:Paragraph({ Title="สถานะ", Desc="รอคำสั่ง..." })
+local function setProgress(txt)
+    print("[Gift]", txt)
+    if progress.SetDesc then progress:SetDesc(txt)
+    elseif progress.Set then progress:Set(txt)
+    elseif progress.SetText then progress:SetText(txt)
+    end
+end
+
+local function fmtLine(egg,i,total) return string.format("%s%s %d/%d", egg.T, egg.M and (" • "..egg.M) or "", i, total) end
+
+local function pickTarget()
+    if selectedTargetName == "[Nearest]" or not selectedTargetName or selectedTargetName=="" then
+        return nearestOtherPlayer()
+    end
+    return Players:FindFirstChild(selectedTargetName)
+end
+
+local function sendBatch(target, amount)
+    local pool = listEggsFiltered(selectedTypes, selectedMuts, nil)
+    if #pool==0 then setProgress("❌ ไม่พบไข่ตรงตัวกรอง"); return end
+    local want = (amount and amount>0) and math.min(amount,#pool) or #pool
+    setProgress(("เตรียมส่ง %d ชิ้น…"):format(want))
+    local sent = 0
+    for i=1,want do
+        local nextOne = listEggsFiltered(selectedTypes, selectedMuts, 1)[1]
+        if not nextOne then break end
+        if giftOnce(target, nextOne) then
+            sent += 1
+            setProgress("✅ "..fmtLine(nextOne, sent, want))
+        else
+            setProgress("⚠️ ส่งไม่สำเร็จ กำลังลองใหม่…")
+            task.wait(0.35)
+        end
+        task.wait(0.12)
+    end
+    if sent>=want then
+        setProgress(("🎉 เสร็จสิ้น %d/%d"):format(sent, want))
+    else
+        setProgress(("⛔ หยุดก่อนครบ %d/%d"):format(sent, want))
+    end
+end
+
+Tab:Button({
+    Title="🎁 Gift ตอนนี้",
+    Callback=function()
+        local target = pickTarget()
+        if not target then setProgress("❌ ยังไม่พบผู้รับ (ลองกด Refresh Players หรือเลือก [Nearest])"); return end
+        local n = tonumber((amountStr or ""):gsub("%s+","")) or 0
+        if n < 0 then n = 0 end
+        setProgress("เริ่มส่งให้ "..target.Name.."...")
+        sendBatch(target, n)
+    end
+})
