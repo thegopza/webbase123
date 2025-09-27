@@ -4,6 +4,7 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
 - egg inventory 5s (PlayerGui.Data.Egg)
+- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall
 - auto reconnect
 ]]
 
@@ -184,6 +185,56 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
+-- === ตัวจัดการข้อความเข้า (รองรับ Exec/Echo) ===
+local function onSocketMessage(self, raw)
+    local ok, obj = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok or type(obj) ~= "table" then
+        return
+    end
+
+    local name = obj.Name
+    local payload = obj.Payload
+
+    if name == "Exec" then
+        local code = payload and payload.Code
+        if type(code) ~= "string" or code == "" then
+            self:Send("Log", { Content = "[Exec] empty code" })
+            return
+        end
+        local fn, err = loadstring(code)
+        if not fn then
+            self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) })
+            return
+        end
+        -- สร้าง env ให้ print ส่งกลับไปเซิร์ฟเวอร์
+        local env = getfenv(fn)
+        env.Player = LocalPlayer
+        env.print = function(...)
+            local t = {}
+            for i, v in ipairs{...} do
+                t[i] = tostring(v)
+            end
+            self:Send("Log", { Content = table.concat(t, " ") })
+        end
+        if setfenv then pcall(setfenv, fn, env) end
+        if newcclosure then pcall(function() env.print = newcclosure(env.print) end) end
+
+        local okRun, errRun = pcall(fn)
+        if not okRun then
+            self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) })
+        end
+
+    elseif name == "Echo" then
+        -- ตัวอย่าง: สะท้อนกลับ
+        local text = payload and payload.Content or ""
+        self:Send("Echo", { Content = tostring(text) })
+
+    -- อนาคต: จะมีคำสั่งอื่น ๆ ก็เพิ่ม case ได้ที่นี่
+    end
+end
+
 function Nexus:Connect(host)
     if host then self.Host = host end
 
@@ -208,9 +259,17 @@ function Nexus:Connect(host)
                     print("[NexusLite] WS closed")
                 end)
             end
-            -- on message (ไม่รับคำสั่งกลับตอนนี้)
+            -- on message (เพิ่มรองรับ Exec/Echo)
             if sock.OnMessage then
-                sock.OnMessage:Connect(function(_) end)
+                sock.OnMessage:Connect(function(msg)
+                    -- msg อาจเป็น string หรือ table แล้วแต่ executor
+                    local s = msg
+                    if typeof(msg) ~= "string" then
+                        local okc, str = pcall(tostring, msg)
+                        s = okc and str or ""
+                    end
+                    onSocketMessage(self, s or "")
+                end)
             end
 
             -- ส่งข้อมูลพื้นฐาน
