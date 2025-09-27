@@ -4,7 +4,7 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
 - egg inventory 5s (PlayerGui.Data.Egg)
-- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall
+- Exec (รับคำสั่งจากเว็บ) -> loadstring/pcall + พิมพ์ลง Dev Console และส่ง Log กลับ
 - auto reconnect
 ]]
 
@@ -185,8 +185,18 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- === ตัวจัดการข้อความเข้า (รองรับ Exec/Echo) ===
+-- ===== 8) ตัวจัดการข้อความเข้า (รองรับ Exec/Echo) =====
 local function onSocketMessage(self, raw)
+    if type(raw) ~= "string" then
+        local okc, s = pcall(tostring, raw)
+        raw = okc and s or ""
+    end
+
+    -- โหมดข้อความดิบ "ping"
+    if raw == "ping" then
+        return
+    end
+
     local ok, obj = pcall(function()
         return HttpService:JSONDecode(raw)
     end)
@@ -197,54 +207,76 @@ local function onSocketMessage(self, raw)
     local name = obj.Name
     local payload = obj.Payload
 
+    if name == "Echo" then
+        local content = payload and payload.Content
+        if content then
+            print("[Echo]", content)
+            self:Send("Log", { Content = "[Echo] " .. tostring(content) })
+        end
+        return
+    end
+
     if name == "Exec" then
-    local code = payload and payload.Code
-    if type(code) ~= "string" or code == "" then
-        self:Send("Log", { Content = "[Exec] empty code" })
+        local code = payload and payload.Code
+        if type(code) ~= "string" or code == "" then
+            self:Send("Log", { Content = "[Exec] empty code" })
+            return
+        end
+
+        -- เลือกฟังก์ชันโหลดให้เหมาะกับ executor
+        local loader = (loadstring or load)
+        if type(loader) ~= "function" then
+            self:Send("Log", { Content = "[Exec] no loadstring/load available on this executor" })
+            return
+        end
+
+        local fn, err = loader(code)
+        if not fn then
+            self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) })
+            return
+        end
+
+        -- ทำให้ print/warn ออกทั้ง 2 ทาง: Dev Console + ส่ง Log กลับ
+        local okEnv, envOrErr = pcall(function()
+            -- บาง executor ไม่มี getfenv/setfenv
+            local env = (_G and type(_G)=="table") and _G or {}
+            env.Player = LocalPlayer
+
+            local original_print = print
+            local original_warn  = warn
+
+            local function toLine(...)
+                local parts = {}
+                local a = {...}
+                for i = 1, #a do parts[i] = tostring(a[i]) end
+                return table.concat(parts, " ")
+            end
+
+            env.print = function(...)
+                pcall(original_print, ...)
+                self:Send("Log", { Content = toLine(...) })
+            end
+            env.warn = function(...)
+                pcall(original_warn, ...)
+                self:Send("Log", { Content = "[WARN] " .. toLine(...) })
+            end
+
+            -- inject env ถ้ามี setfenv
+            if setfenv then pcall(setfenv, fn, env) end
+            return env
+        end)
+
+        -- run
+        local okRun, errRun = pcall(fn)
+        if not okRun then
+            warn("[Exec] runtime error:", errRun)
+            self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) })
+        end
         return
-    end
-
-    local fn, err = loadstring(code)
-    if not fn then
-        self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) })
-        return
-    end
-
-    -- ทำให้ print/warn ออกทั้ง 2 ทาง: (1) Developer Console (2) ส่ง Log กลับเซิร์ฟเวอร์
-    local env = getfenv(fn)
-    local original_print = print
-    local original_warn  = warn
-
-    local function toLine(...)
-        local parts = {}
-        for i, v in ipairs{...} do parts[i] = tostring(v) end
-        return table.concat(parts, " ")
-    end
-
-    env.Player = LocalPlayer
-    env.print = function(...)
-        -- พิมพ์ลง Developer Console
-        pcall(original_print, ...)
-        -- ส่งกลับไปเซิร์ฟเวอร์
-        self:Send("Log", { Content = toLine(...) })
-    end
-    env.warn = function(...)
-        pcall(original_warn, ...)
-        self:Send("Log", { Content = "[WARN] " .. toLine(...) })
-    end
-
-    if setfenv then pcall(setfenv, fn, env) end
-    if newcclosure then pcall(function() env.print = newcclosure(env.print); env.warn = newcclosure(env.warn) end) end
-
-    local okRun, errRun = pcall(fn)
-    if not okRun then
-        -- โชว์ใน Developer Console และส่งกลับ
-        pcall(original_warn, "[Exec] runtime error:", errRun)
-        self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) })
     end
 end
 
-
+-- ===== 9) Connect / Loop =====
 function Nexus:Connect(host)
     if host then self.Host = host end
 
@@ -272,21 +304,13 @@ function Nexus:Connect(host)
             -- on message (เพิ่มรองรับ Exec/Echo)
             if sock.OnMessage then
                 sock.OnMessage:Connect(function(msg)
-                    -- msg อาจเป็น string หรือ table แล้วแต่ executor
-                    local s = msg
-                    if typeof(msg) ~= "string" then
-                        local okc, str = pcall(tostring, msg)
-                        s = okc and str or ""
-                    end
-                    onSocketMessage(self, s or "")
+                    onSocketMessage(self, msg)
                 end)
             end
 
             -- ส่งข้อมูลพื้นฐาน
             self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
-            -- roomName ถูกส่งใน query แล้ว ถ้าต้องการเปลี่ยน runtime:
-            -- self:Send("SetRoomName", { Content = makeRoomName() })
 
             local lastMoney
             local tRoster = 0
@@ -333,9 +357,8 @@ function Nexus:Stop()
     end
 end
 
--- ===== 8) Hooks เล็กน้อย =====
+-- ===== 10) Hooks เล็กน้อย =====
 Players.PlayerAdded:Connect(function()
-    -- ทิ้งช่วงนิดหน่อยให้ WS loop รอบถัดไปเก็บ roster
     task.wait(0.5)
 end)
 Players.PlayerRemoving:Connect(function()
@@ -348,7 +371,6 @@ LocalPlayer.OnTeleport:Connect(function(state)
     end
 end)
 
--- ===== 9) Expose & Start =====
+-- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
