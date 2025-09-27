@@ -198,42 +198,52 @@ local function onSocketMessage(self, raw)
     local payload = obj.Payload
 
     if name == "Exec" then
-        local code = payload and payload.Code
-        if type(code) ~= "string" or code == "" then
-            self:Send("Log", { Content = "[Exec] empty code" })
-            return
-        end
-        local fn, err = loadstring(code)
-        if not fn then
-            self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) })
-            return
-        end
-        -- สร้าง env ให้ print ส่งกลับไปเซิร์ฟเวอร์
-        local env = getfenv(fn)
-        env.Player = LocalPlayer
-        env.print = function(...)
-            local t = {}
-            for i, v in ipairs{...} do
-                t[i] = tostring(v)
-            end
-            self:Send("Log", { Content = table.concat(t, " ") })
-        end
-        if setfenv then pcall(setfenv, fn, env) end
-        if newcclosure then pcall(function() env.print = newcclosure(env.print) end) end
+    local code = payload and payload.Code
+    if type(code) ~= "string" or code == "" then
+        self:Send("Log", { Content = "[Exec] empty code" })
+        return
+    end
 
-        local okRun, errRun = pcall(fn)
-        if not okRun then
-            self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) })
-        end
+    local fn, err = loadstring(code)
+    if not fn then
+        self:Send("Log", { Content = "[Exec] load error: " .. tostring(err) })
+        return
+    end
 
-    elseif name == "Echo" then
-        -- ตัวอย่าง: สะท้อนกลับ
-        local text = payload and payload.Content or ""
-        self:Send("Echo", { Content = tostring(text) })
+    -- ทำให้ print/warn ออกทั้ง 2 ทาง: (1) Developer Console (2) ส่ง Log กลับเซิร์ฟเวอร์
+    local env = getfenv(fn)
+    local original_print = print
+    local original_warn  = warn
 
-    -- อนาคต: จะมีคำสั่งอื่น ๆ ก็เพิ่ม case ได้ที่นี่
+    local function toLine(...)
+        local parts = {}
+        for i, v in ipairs{...} do parts[i] = tostring(v) end
+        return table.concat(parts, " ")
+    end
+
+    env.Player = LocalPlayer
+    env.print = function(...)
+        -- พิมพ์ลง Developer Console
+        pcall(original_print, ...)
+        -- ส่งกลับไปเซิร์ฟเวอร์
+        self:Send("Log", { Content = toLine(...) })
+    end
+    env.warn = function(...)
+        pcall(original_warn, ...)
+        self:Send("Log", { Content = "[WARN] " .. toLine(...) })
+    end
+
+    if setfenv then pcall(setfenv, fn, env) end
+    if newcclosure then pcall(function() env.print = newcclosure(env.print); env.warn = newcclosure(env.warn) end) end
+
+    local okRun, errRun = pcall(fn)
+    if not okRun then
+        -- โชว์ใน Developer Console และส่งกลับ
+        pcall(original_warn, "[Exec] runtime error:", errRun)
+        self:Send("Log", { Content = "[Exec] runtime error: " .. tostring(errRun) })
     end
 end
+
 
 function Nexus:Connect(host)
     if host then self.Host = host end
@@ -341,3 +351,4 @@ end)
 -- ===== 9) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
