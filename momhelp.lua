@@ -396,16 +396,16 @@ local function giftOnce(targetPlr, eggUID)
 
     teleportNear(targetPlr, 1.6)
     holdEgg(eggUID)
-    task.wait(0.30) -- รอ state ถือของ
+    task.wait(0.50) -- รอ state ถือของ
 
     local ok = false
     for attempt = 1, 3 do
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if ok then break end
         holdEgg(eggUID)
-        task.wait(0.20 + 0.15 * attempt)
+        task.wait(0.20 + 0.25 * attempt)
     end
-    task.wait(0.30)
+    task.wait(0.70)
     return ok == true
 end
 
@@ -691,3 +691,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
