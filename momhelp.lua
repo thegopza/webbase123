@@ -343,103 +343,114 @@ local function teleportNear(targetPlr, offset)
     return true
 end
 
-local function eggFolder()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+-- ===== Confirm utilities (Eggs) =====
+local function _eggFolder()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     return data and data:FindFirstChild("Egg") or nil
 end
 
-local function normalizeMut(m) if not m then return nil end m = tostring(m); if m=="Jurassic" then return "Dino" end return m end
+local function getEggInfo(uid)
+    local eg = _eggFolder(); if not eg then return nil end
+    local ch = eg:FindFirstChild(tostring(uid))
+    if not ch then return nil end
+    local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
+    local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
+    return { uid=tostring(uid), T=tostring(T), M=M }
+end
 
-local function listEggsFiltered(typeSet, mutSet, limit)
-    local eg = eggFolder()
-    local out = {}
-    if not eg then return out end
+local function hasEggUID(uid)
+    local eg = _eggFolder(); if not eg then return false end
+    return eg:FindFirstChild(tostring(uid)) ~= nil
+end
+
+local function countEggTM(T, M)
+    local eg = _eggFolder(); if not eg then return 0 end
+    local n = 0
     for _, ch in ipairs(eg:GetChildren()) do
         if #ch:GetChildren() == 0 then
-            local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
-            local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
-            local okType = (not typeSet) or (next(typeSet)==nil) or typeSet[tostring(T)]
-            local okMut  = (not mutSet)  or (next(mutSet) ==nil) or mutSet[tostring(M or "")]
-            if okType and okMut then
-                out[#out+1] = { uid = ch.Name, T = tostring(T), M = M }
-                if limit and #out >= limit then break end
+            local t = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
+            local m = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
+            if tostring(t) == tostring(T) and tostring(m or "") == tostring(M or "") then
+                n += 1 -- นับเป็นชิ้นๆ (ตาม UID)
             end
         end
     end
-    return out
+    return n
 end
 
-local function tap(key)
-    VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.04)
-    VirtualInputManager:SendKeyEvent(false, key, false, game)
-end
-
--- ⛳ โฟกัสไข่ด้วย CharacterRE ก่อน, ถ้าไม่ได้ค่อย fallback ไปวิธีกดปุ่มถือไข่
-local function holdEgg(uid)
-    if not uid then return end
-
-    -- โฟกัสโดยตรงถ้า CharacterRE มีให้ใช้
-    if CharacterRE then
-        local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(uid)) end)
-        if not ok then
-            ok = pcall(function() CharacterRE:FireServer("Focus", "Egg_" .. tostring(uid)) end)
+-- รอคอนเฟิร์มว่า “ลดจริง 1 ชิ้น” (UID หายหรือยอด T|M ลด)
+local function waitConfirmEgg(uid, T, M, prevCount, timeoutSec)
+    local t0 = os.clock()
+    timeoutSec = timeoutSec or 3.0
+    while (os.clock() - t0) <= timeoutSec do
+        -- 1) UID ต้องหาย
+        if not hasEggUID(uid) then return true end
+        -- 2) หรือจำนวน T|M ลดลง 1
+        if prevCount and prevCount > 0 then
+            local now = countEggTM(T, M)
+            if now == (prevCount - 1) then return true end
         end
-        if ok then
-            task.wait(0.70) -- เว้นให้ฝั่งเกมอัปเดต selection
-            return
-        end
+        task.wait(0.08)
     end
-
-    -- 🔙 fallback: ผ่าน Deploy + key taps
-    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
-    local data = pg and pg:FindFirstChild("Data")
-    local deploy = data and data:FindFirstChild("Deploy")
-    if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
-    tap(Enum.KeyCode.One); task.wait(0.30)
-    tap(Enum.KeyCode.Two); task.wait(0.30)
+    return false
 end
 
+-- ===== Confirm utilities (Foods) =====
+local function waitConfirmFood(name, prevCount, timeoutSec)
+    local t0 = os.clock()
+    timeoutSec = timeoutSec or 2.5
+    while (os.clock() - t0) <= timeoutSec do
+        local now = getFoodCount(name)
+        if now == (prevCount - 1) then return true end
+        task.wait(0.06)
+    end
+    return false
+end
+
+-- ===== UPDATED: giftOnce (Egg) — with confirmation & backoff =====
 local function giftOnce(targetPlr, eggUID)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
 
+    local meta = getEggInfo(eggUID)
+    if not meta then return false, "uid missing" end
+    local prevCount = countEggTM(meta.T, meta.M)
+
     teleportNear(targetPlr, 1.6)
     holdEgg(eggUID)
-    task.wait(0.80) -- รอ state ถือของ
+    task.wait(0.35)
 
     local ok = false
-    for attempt = 1, 3 do
+    local delay = 0.10
+    for attempt = 1, 4 do
+        -- ยิงรีโมต
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
-        if ok then break end
+
+        -- ยืนยันผล
+        local confirmed = waitConfirmEgg(eggUID, meta.T, meta.M, prevCount, 2.0 + attempt*0.4)
+        if ok and confirmed then
+            task.wait(0.10)
+            return true
+        end
+
+        -- ล้มเหลว: โฟกัสใหม่ + backoff แล้วลองอีก
         holdEgg(eggUID)
-        task.wait(0.70 + 0.75 * attempt)
+        task.wait(delay + attempt*0.15)
     end
-    task.wait(0.80)
-    return ok == true
+
+    return false, "no confirm"
 end
 
-local giftCancelFlag = false
-local function giftProgress(sendFn, sent, total, label)
-    sendFn("GiftProgress", { sent = sent, total = total, label = label })
-end
-
-local function resolveTarget(str)
-    if not str then return nil end
-    for _,p in ipairs(Players:GetPlayers()) do
-        if tostring(p.UserId)==tostring(str) or p.Name==tostring(str) then return p end
-    end
-    return nil
-end
-
+-- ===== UPDATED: giftBatchFiltered (เลือกตาม T/M จำนวน N) =====
 local function giftBatchFiltered(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
-    local target = resolveTarget(payload.Target)
+    local target = resolveTarget(payload and payload.Target)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
 
     local typeSet = payload.T and {[tostring(payload.T)]=true} or {}
     local mutSet  = payload.M and {[tostring(normalizeMut(payload.M))]=true} or {}
-    if mutSet["Dino"] then mutSet["Jurassic"]=true end
+    if mutSet["Dino"] then mutSet["Jurassic"] = true end
 
     local pool = listEggsFiltered(typeSet, mutSet, nil)
     local want = tonumber(payload.Amount or 0) or 0
@@ -447,82 +458,71 @@ local function giftBatchFiltered(sendFn, payload)
     want = math.min(want, #pool)
 
     local sent=0; giftCancelFlag=false
-    giftProgress(sendFn, 0, want, "start")
+    sendFn("GiftProgress", { sent=0, total=want, label="start" })
+
     while sent < want and not giftCancelFlag do
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
         local ok = giftOnce(target, egg.uid)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
-        task.wait(0.12)
+        if ok then
+            sent += 1
+        end
+        sendFn("GiftProgress", { sent=sent, total=want, label=(egg.T .. (egg.M and (" • "..egg.M) or "")) })
+        task.wait(0.10)
     end
+
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
 
+-- ===== UPDATED: giftBatchUIDs (ส่งตามรายชื่อ UID) =====
 local function giftBatchUIDs(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
-    local target = resolveTarget(payload.Target)
+    local target = resolveTarget(payload and payload.Target)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+
     local uids = payload.UIDs
     if type(uids)~="table" or #uids==0 then sendFn("GiftDone",{ok=false,reason="no UIDs",sent=0,total=0}); return end
+
     local total=#uids; local sent=0; giftCancelFlag=false
-    giftProgress(sendFn, 0, total, "start")
+    sendFn("GiftProgress", { sent=0, total=total, label="start" })
+
     for _,uid in ipairs(uids) do
         if giftCancelFlag then break end
         local ok = giftOnce(target, uid)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, total, uid)
-        task.wait(0.12)
+        if ok then sent += 1 end
+        sendFn("GiftProgress", { sent=sent, total=total, label=tostring(uid) })
+        task.wait(0.10)
     end
+
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
 
--- ===== [Gift Food] Focus ตามชื่อ + GiftRE ทีละชิ้น (Asset-based) =====
-local function focusFood(name)
-    if not name or name=="" then return false end
-    local canonical = canonicalFoodName(name) or tostring(name)
-
-    -- โฟกัสด้วย CharacterRE ก่อน
-    if CharacterRE then
-        local ok = pcall(function() CharacterRE:FireServer("Focus", canonical) end)
-        if not ok then
-            ok = pcall(function() CharacterRE:FireServer("Focus", "Food_" .. canonical) end)
-        end
-        if ok then task.wait(0.18); return true end
-    end
-
-    -- Fallback: Deploy + key taps เพื่อบังคับถือ
-    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
-    local data = pg and pg:FindFirstChild("Data")
-    local deploy = data and data:FindFirstChild("Deploy")
-    if deploy then deploy:SetAttribute("S2", "Food_" .. canonical) end
-    tap(Enum.KeyCode.One); task.wait(0.25)
-    tap(Enum.KeyCode.Two); task.wait(0.25)
-    return true
-end
-
+-- ===== UPDATED: giveFoodOnce / giftBatchFood (ยืนยันด้วย Asset attribute) =====
 local function giveFoodOnce(targetPlr, foodName)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not foodName or foodName=="" then return false, "no food name" end
-    if getFoodCount(foodName) <= 0 then return false, "no stock" end
+
+    local have0 = getFoodCount(foodName)
+    if have0 <= 0 then return false, "no stock" end
 
     teleportNear(targetPlr, 1.6)
-
     local focused = focusFood(foodName)
     if not focused then return false, "focus failed" end
-
-    task.wait(0.12)
+    task.wait(0.08)
 
     local ok = false
-    for attempt = 1, 3 do
+    for attempt = 1, 4 do
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
-        if ok then break end
+        local confirmed = waitConfirmFood(foodName, have0, 1.6 + attempt*0.3)
+        if ok and confirmed then
+            task.wait(0.06)
+            return true
+        end
+        -- re-focus + backoff
         focusFood(foodName)
-        task.wait(0.10 + 0.05 * attempt)
+        task.wait(0.08 + attempt*0.12)
     end
-
-    task.wait(0.18)
-    return ok == true
+    return false, "no confirm"
 end
 
 local function giftBatchFood(sendFn, payload)
@@ -539,17 +539,19 @@ local function giftBatchFood(sendFn, payload)
     want = math.min(want, have)
 
     local sent=0; giftCancelFlag=false
-    giftProgress(sendFn, 0, want, foodName)
+    sendFn("GiftProgress", { sent=0, total=want, label=foodName })
+
     while sent < want and not giftCancelFlag do
+        -- double-check stock ก่อนทุกครั้ง (กัน desync)
         if getFoodCount(foodName) <= 0 then break end
         local ok = giveFoodOnce(target, foodName)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, want, foodName)
-        task.wait(0.10)
+        if ok then sent += 1 end
+        sendFn("GiftProgress", { sent=sent, total=want, label=foodName })
+        task.wait(0.06)
     end
+
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
--- ===== [Gift Food] END =====
 
 -- ===== 6) ชื่อห้อง =====
 local function makeRoomName()
@@ -714,4 +716,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
