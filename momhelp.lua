@@ -386,7 +386,7 @@ local function holdEgg(uid)
             ok = pcall(function() CharacterRE:FireServer("Focus", "Egg_" .. tostring(uid)) end)
         end
         if ok then
-            task.wait(0.50) -- เว้นให้ฝั่งเกมอัปเดต selection
+            task.wait(0.70) -- เว้นให้ฝั่งเกมอัปเดต selection
             return
         end
     end
@@ -714,3 +714,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
+
