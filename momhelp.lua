@@ -285,6 +285,19 @@ local function readFoods()
     return out
 end
 
+-- [Gift Food] helper: โฟลเดอร์/ยอดคงเหลืออาหาร
+local function foodsFolder()
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data"); if not data then return nil end
+    local fs   = data:FindFirstChild("FoodStore"); if not fs then return nil end
+    return fs:FindFirstChild("LST")
+end
+local function getFoodCount(name)
+    local lst = foodsFolder(); if not lst then return 0 end
+    local v = lst:GetAttribute(name)
+    return tonumber(v) or 0
+end
+
 -- ===== 5.5) Gift helpers (Build A Zoo) =====
 local GiftRE = (function()
     local ok, remote = pcall(function()
@@ -363,7 +376,7 @@ local function holdEgg(uid)
             ok = pcall(function() CharacterRE:FireServer("Focus", "Egg_" .. tostring(uid)) end)
         end
         if ok then
-            task.wait(0.18) -- เว้นให้ฝั่งเกมอัปเดต selection
+            task.wait(0.30) -- เว้นให้ฝั่งเกมอัปเดต selection
             return
         end
     end
@@ -373,26 +386,26 @@ local function holdEgg(uid)
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
     if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
-    tap(Enum.KeyCode.One); task.wait(0.15)
-    tap(Enum.KeyCode.Two); task.wait(0.25)
+    tap(Enum.KeyCode.One); task.wait(0.30)
+    tap(Enum.KeyCode.Two); task.wait(0.30)
 end
 
-local function giftOnce(targetPlayer, eggUID)
-    if not targetPlayer or not targetPlayer.Parent then return false, "no target" end
+local function giftOnce(targetPlr, eggUID)
+    if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
 
-    teleportNear(targetPlayer, 1.6)
+    teleportNear(targetPlr, 1.6)
     holdEgg(eggUID)
-    task.wait(0.12) -- รอ state ถือของ
+    task.wait(0.30) -- รอ state ถือของ
 
     local ok = false
     for attempt = 1, 3 do
-        ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end) or false
+        ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if ok then break end
         holdEgg(eggUID)
-        task.wait(0.10 + 0.05 * attempt)
+        task.wait(0.20 + 0.15 * attempt)
     end
-    task.wait(0.18)
+    task.wait(0.30)
     return ok == true
 end
 
@@ -453,6 +466,67 @@ local function giftBatchUIDs(sendFn, payload)
     end
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
+
+-- ===== [Gift Food] Focus ตามชื่อ + GiftRE ทีละชิ้น =====
+local function focusFood(name)
+    if not CharacterRE or not name or name=="" then return false end
+    local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(name)) end)
+    if not ok then
+        ok = pcall(function() CharacterRE:FireServer("Focus", "Food_" .. tostring(name)) end)
+    end
+    if ok then task.wait(0.18) end
+    return ok
+end
+
+local function giveFoodOnce(targetPlr, foodName)
+    if not targetPlr or not targetPlr.Parent then return false, "no target" end
+    if not foodName or foodName=="" then return false, "no food name" end
+    if getFoodCount(foodName) <= 0 then return false, "no stock" end
+
+    teleportNear(targetPlr, 1.6)
+
+    local focused = focusFood(foodName)
+    if not focused then return false, "focus failed" end
+
+    task.wait(0.12)
+
+    local ok = false
+    for attempt = 1, 3 do
+        ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
+        if ok then break end
+        focusFood(foodName)
+        task.wait(0.10 + 0.05 * attempt)
+    end
+
+    task.wait(0.18)
+    return ok == true
+end
+
+local function giftBatchFood(sendFn, payload)
+    local target = resolveTarget(payload and payload.Target)
+    if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+    local foodName = tostring(payload and payload.Food or "")
+    if foodName=="" then sendFn("GiftDone",{ok=false,reason="no food",sent=0,total=0}); return end
+
+    local have = getFoodCount(foodName)
+    if have<=0 then sendFn("GiftDone",{ok=false,reason="no stock",sent=0,total=0}); return end
+
+    local want = tonumber(payload.Amount or 0) or 0
+    if want<=0 then want = have end
+    want = math.min(want, have)
+
+    local sent=0; giftCancelFlag=false
+    giftProgress(sendFn, 0, want, foodName)
+    while sent < want and not giftCancelFlag do
+        if getFoodCount(foodName) <= 0 then break end
+        local ok = giveFoodOnce(target, foodName)
+        sent += ok and 1 or 0
+        giftProgress(sendFn, sent, want, foodName)
+        task.wait(0.10)
+    end
+    sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+end
+-- ===== [Gift Food] END =====
 
 -- ===== 6) ชื่อห้อง =====
 local function makeRoomName()
@@ -525,6 +599,13 @@ local function onSocketMessage(self, raw)
     if name == "GiftUIDs" then
         slog("[GiftUIDs] to "..tostring(payload and payload.Target or "?"))
         task.spawn(function() giftBatchUIDs(function(n,p) self:Send(n,p) end, payload or {}) end)
+        return
+    end
+
+    -- === [Gift Food] Focus ตามชื่อ + GiftRE ===
+    if name == "GiftFoodStart" then
+        slog("[GiftFoodStart] to "..tostring(payload and payload.Target or "?").." food="..tostring(payload and payload.Food))
+        task.spawn(function() giftBatchFood(function(n,p) self:Send(n,p) end, payload or {}) end)
         return
     end
 
