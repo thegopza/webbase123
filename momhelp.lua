@@ -23,12 +23,12 @@ if not WSConnect then
 end
 
 -- ===== 2) Services =====
-local HttpService        = game:GetService("HttpService")
-local Players            = game:GetService("Players")
-local Workspace          = game:GetService("Workspace")
-local MarketplaceService = game:GetService("MarketplaceService")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local VirtualInputManager= game:GetService("VirtualInputManager")
+local HttpService         = game:GetService("HttpService")
+local Players             = game:GetService("Players")
+local Workspace           = game:GetService("Workspace")
+local MarketplaceService  = game:GetService("MarketplaceService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
@@ -47,9 +47,9 @@ local function getCharacterSnapshot()
     local pos = hrp and hrp.Position
     return {
         characterName = char.Name,
-        health   = hum and hum.Health or nil,
-        maxHealth= hum and hum.MaxHealth or nil,
-        position = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
+        health    = hum and hum.Health or nil,
+        maxHealth = hum and hum.MaxHealth or nil,
+        position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
     }
 end
 
@@ -265,6 +265,26 @@ local function readEggs()
     return list
 end
 
+-- ===== 5.x) Foods Inventory (จาก PlayerGui.Data.FoodStore.LST: Attributes) =====
+local function readFoods()
+    -- path: PlayerGui.Data.FoodStore.LST (attributes: Apple, Banana, ... -> จำนวน)
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return {} end
+    local data = pg:FindFirstChild("Data");                       if not data then return {} end
+    local fs   = data:FindFirstChild("FoodStore");                if not fs then return {} end
+    local lst  = fs:FindFirstChild("LST");                        if not lst then return {} end
+
+    local attrs = lst:GetAttributes()
+    local out = {}
+    for name, val in pairs(attrs) do
+        local n = tonumber(val) or 0
+        if n > 0 then
+            out[#out+1] = { name = tostring(name), count = n }
+        end
+    end
+    table.sort(out, function(a,b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+    return out
+end
+
 -- ===== 5.5) Gift helpers (Build A Zoo) =====
 local GiftRE = (function()
     local ok, remote = pcall(function()
@@ -273,7 +293,7 @@ local GiftRE = (function()
     return ok and remote or nil
 end)()
 
--- ✅ เพิ่ม CharacterRE (สำหรับเลือก/โฟกัส UIDs โดยตรง)
+-- ✅ CharacterRE สำหรับเลือก/โฟกัส UIDs โดยตรง
 local CharacterRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE")
@@ -332,25 +352,23 @@ local function tap(key)
     VirtualInputManager:SendKeyEvent(false, key, false, game)
 end
 
--- ⛳ พยายามโฟกัสไข่ด้วย CharacterRE ก่อน, ถ้าไม่ได้ค่อย fallback ไปแบบกดปุ่มถือไข่
+-- ⛳ โฟกัสไข่ด้วย CharacterRE ก่อน, ถ้าไม่ได้ค่อย fallback ไปวิธีกดปุ่มถือไข่
 local function holdEgg(uid)
     if not uid then return end
 
-    -- ลองโฟกัสโดยตรงถ้า CharacterRE มีให้ใช้
+    -- โฟกัสโดยตรงถ้า CharacterRE มีให้ใช้
     if CharacterRE then
-        -- บางเกมใช้ uid ตรง ๆ, บางเกมใช้ "Egg_<uid>" -> ลอง 2 แบบ
         local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(uid)) end)
         if not ok then
             ok = pcall(function() CharacterRE:FireServer("Focus", "Egg_" .. tostring(uid)) end)
         end
         if ok then
-            -- เว้นให้ฝั่งเกมอัปเดต selection
-            task.wait(0.18)
+            task.wait(0.18) -- เว้นให้ฝั่งเกมอัปเดต selection
             return
         end
     end
 
-    -- 🔙 fallback: วิธีเดิมผ่าน PlayerGui.Data.Deploy + กดปุ่ม
+    -- 🔙 fallback: ผ่าน Deploy + key taps
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
@@ -363,26 +381,17 @@ local function giftOnce(targetPlayer, eggUID)
     if not targetPlayer or not targetPlayer.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
 
-    -- เข้าใกล้เป้าหมาย
     teleportNear(targetPlayer, 1.6)
-
-    -- เลือก/ถือไข่
     holdEgg(eggUID)
+    task.wait(0.12) -- รอ state ถือของ
 
-    -- รอเฟรมให้ฝั่งเกมอัปเดตสถานะถือของ (กันเคสยิงเร็วแล้วไม่ติด)
-    task.wait(0.12)
-
-    -- ยิง GiftRE พร้อมรีไทร 2 ครั้งแบบ backoff สั้น ๆ
     local ok = false
     for attempt = 1, 3 do
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlayer) end) or false
         if ok then break end
-        -- โฟกัส/ถือซ้ำเผื่อ state หลุด แล้วหน่วงเพิ่มเล็กน้อย
         holdEgg(eggUID)
         task.wait(0.10 + 0.05 * attempt)
     end
-
-    -- กันยิงถี่เกิน: เว้นท้ายอีกหน่อยให้เซิร์ฟเวอร์ประมวลผล
     task.wait(0.18)
     return ok == true
 end
@@ -556,7 +565,13 @@ function Nexus:Connect(host)
                 if tRoster >= 2 then tRoster = 0; self:Send("SetRoster", { List = buildRoster(), JobId = tostring(game.JobId) }) end
 
                 tInv += 1
-                if tInv >= 5 then tInv = 0; self:Send("SetInventory", { Eggs = readEggs() }) end
+                if tInv >= 5 then
+                    tInv = 0
+                    self:Send("SetInventory", {
+                        Eggs  = readEggs(),
+                        Foods = readFoods(), -- << ส่ง Foods เพิ่ม
+                    })
+                end
 
                 tChar += 1
                 if tChar >= 1 then
@@ -595,5 +610,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
-
