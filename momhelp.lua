@@ -3,10 +3,10 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - ping 1s
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
-- egg inventory 5s (PlayerGui.Data.Egg)
+- inventory 5s (Egg + Food via PlayerGui.Data.Asset attributes)
 - farm status 6s (OccupyingPlayerId + ป้องกันนับซ้ำ/ฟิลเตอร์ขนาด)
 - Exec (loadstring/pcall) + Log
-- Gift (รับคำสั่งจากเว็บ: GiftStart / GiftUIDs)
+- Gift (Eggs: GiftStart / GiftUIDs, Foods: GiftFoodStart)
 - auto reconnect
 ]]
 
@@ -265,36 +265,46 @@ local function readEggs()
     return list
 end
 
--- ===== 5.x) Foods Inventory (จาก PlayerGui.Data.FoodStore.LST: Attributes) =====
-local function readFoods()
-    -- path: PlayerGui.Data.FoodStore.LST (attributes: Apple, Banana, ... -> จำนวน)
-    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return {} end
-    local data = pg:FindFirstChild("Data");                       if not data then return {} end
-    local fs   = data:FindFirstChild("FoodStore");                if not fs then return {} end
-    local lst  = fs:FindFirstChild("LST");                        if not lst then return {} end
+-- ===== 5.x) Foods Inventory (จาก PlayerGui.Data.Asset: Attributes) =====
+-- รายชื่อมาตรฐาน (TitleCase) ใช้ตรวจ/แปลงแบบ case-insensitive
+local FOOD_LIST = {
+  "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
+  "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
+  "Orange","Pear","Pineapple","Strawberry","VoltGinkgo","Watermelon"
+}
+local FOOD_SET = {}; for _,n in ipairs(FOOD_LIST) do FOOD_SET[string.lower(n)] = n end
+local function canonicalFoodName(input)
+    if not input or input=="" then return nil end
+    local k = string.lower(tostring(input)); return FOOD_SET[k]
+end
 
-    local attrs = lst:GetAttributes()
+local function foodsAssetFolder()
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    return data:FindFirstChild("Asset")
+end
+
+local function readFoods()
+    -- path: PlayerGui.Data.Asset (attributes: Apple, Banana, ... -> จำนวน)
+    local asset = foodsAssetFolder(); if not asset then return {} end
+    local attrs = asset:GetAttributes()
     local out = {}
     for name, val in pairs(attrs) do
+        local canonical = canonicalFoodName(name) or tostring(name)
         local n = tonumber(val) or 0
         if n > 0 then
-            out[#out+1] = { name = tostring(name), count = n }
+            out[#out+1] = { name = canonical, count = n }
         end
     end
     table.sort(out, function(a,b) return tostring(a.name):lower() < tostring(b.name):lower() end)
     return out
 end
 
--- [Gift Food] helper: โฟลเดอร์/ยอดคงเหลืออาหาร
-local function foodsFolder()
-    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data"); if not data then return nil end
-    local fs   = data:FindFirstChild("FoodStore"); if not fs then return nil end
-    return fs:FindFirstChild("LST")
-end
+-- [Gift Food] helper: โฟลเดอร์/ยอดคงเหลืออาหาร (จาก Data.Asset)
 local function getFoodCount(name)
-    local lst = foodsFolder(); if not lst then return 0 end
-    local v = lst:GetAttribute(name)
+    local asset = foodsAssetFolder(); if not asset then return 0 end
+    local canonical = canonicalFoodName(name) or tostring(name)
+    local v = asset:GetAttribute(canonical)
     return tonumber(v) or 0
 end
 
@@ -306,7 +316,7 @@ local GiftRE = (function()
     return ok and remote or nil
 end)()
 
--- ✅ CharacterRE สำหรับเลือก/โฟกัส UIDs โดยตรง
+-- ✅ CharacterRE สำหรับเลือก/โฟกัส UIDs/Item โดยตรง
 local CharacterRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE")
@@ -467,15 +477,28 @@ local function giftBatchUIDs(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
 
--- ===== [Gift Food] Focus ตามชื่อ + GiftRE ทีละชิ้น =====
+-- ===== [Gift Food] Focus ตามชื่อ + GiftRE ทีละชิ้น (Asset-based) =====
 local function focusFood(name)
-    if not CharacterRE or not name or name=="" then return false end
-    local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(name)) end)
-    if not ok then
-        ok = pcall(function() CharacterRE:FireServer("Focus", "Food_" .. tostring(name)) end)
+    if not name or name=="" then return false end
+    local canonical = canonicalFoodName(name) or tostring(name)
+
+    -- โฟกัสด้วย CharacterRE ก่อน
+    if CharacterRE then
+        local ok = pcall(function() CharacterRE:FireServer("Focus", canonical) end)
+        if not ok then
+            ok = pcall(function() CharacterRE:FireServer("Focus", "Food_" .. canonical) end)
+        end
+        if ok then task.wait(0.18); return true end
     end
-    if ok then task.wait(0.18) end
-    return ok
+
+    -- Fallback: Deploy + key taps เพื่อบังคับถือ
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+    local data = pg and pg:FindFirstChild("Data")
+    local deploy = data and data:FindFirstChild("Deploy")
+    if deploy then deploy:SetAttribute("S2", "Food_" .. canonical) end
+    tap(Enum.KeyCode.One); task.wait(0.25)
+    tap(Enum.KeyCode.Two); task.wait(0.25)
+    return true
 end
 
 local function giveFoodOnce(targetPlr, foodName)
@@ -650,7 +673,7 @@ function Nexus:Connect(host)
                     tInv = 0
                     self:Send("SetInventory", {
                         Eggs  = readEggs(),
-                        Foods = readFoods(), -- << ส่ง Foods เพิ่ม
+                        Foods = readFoods(), -- << ส่ง Foods จาก Data.Asset (attributes)
                     })
                 end
 
@@ -691,6 +714,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
-
-
