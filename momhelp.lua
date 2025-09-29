@@ -7,8 +7,8 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - farm status 6s (OccupyingPlayerId + ป้องกันนับซ้ำ/ฟิลเตอร์ขนาด)
 - Exec (loadstring/pcall) + Log
 - Gift (Eggs: GiftStart / GiftUIDs, Foods: GiftFoodStart)
+- Gift Daily counter from PlayerGui.Data.UserFlag (SetGiftDaily)
 - auto reconnect
-- SetGiftDaily (ส่งยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -308,21 +308,18 @@ end
 
 -- >>> NEW: Gift daily counter (จาก PlayerGui.Data.UserFlag)
 local function readGiftDaily()
-    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local data = pg:FindFirstChild("Data");                       if not data then return nil end
     local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
-
     local usedAttr = uf:GetAttribute("TodaySendGiftCount")
-    local dateAttr = uf:GetAttribute("TodaySendGiftTimer")  -- คาดว่าเป็นรูปแบบ YYYYMMDD ตามภาพ
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- อาจเป็น YYYYMMDD
     local used = tonumber(usedAttr) or 0
     local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
-
     return { used = used, limit = 500, date = date }
 end
 -- <<< NEW
 
--- ===== 5.5) Gift helpers (Build A Zoo) =====
+-- ===== 5.5) Gift helpers (Remotes) =====
 local GiftRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("GiftRE")
@@ -330,7 +327,6 @@ local GiftRE = (function()
     return ok and remote or nil
 end)()
 
--- ✅ CharacterRE สำหรับเลือก/โฟกัส UIDs/Item โดยตรง
 local CharacterRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE")
@@ -357,13 +353,79 @@ local function teleportNear(targetPlr, offset)
     return true
 end
 
--- ===== Confirm utilities (Eggs) =====
+-- ==== MISSING HELPERS (จำเป็นต่อ Gift) ====
+local function normalizeMut(v)
+    if v == nil then return nil end
+    v = tostring(v)
+    v = v:gsub("^%s+",""):gsub("%s+$","")
+    local low = string.lower(v)
+    if low == "" or low == "none" or v == "-" then return nil end
+    if low == "jurassic" then return "Dino" end
+    return v
+end
+
+local function resolveTarget(key)
+    if key == nil then return nil end
+    local s = tostring(key)
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if tostring(plr.UserId) == s or plr.Name == s then
+            return plr
+        end
+    end
+    return nil
+end
+
 local function _eggFolder()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     return data and data:FindFirstChild("Egg") or nil
 end
 
+local function holdEgg(uid)
+    -- ปรับ payload ให้ตรงกับเกมจริงถ้าจำเป็น
+    if CharacterRE then pcall(function() CharacterRE:FireServer("FocusEgg", { UID = tostring(uid) }) end) end
+    return true
+end
+
+local function focusFood(name)
+    local ok = false
+    if CharacterRE then ok = pcall(function() CharacterRE:FireServer("FocusFood", { Name = tostring(name) }) end) and true or false end
+    return ok or true
+end
+
+local function listEggsFiltered(typeSet, mutSet, limit)
+    local eg = _eggFolder(); if not eg then return {} end
+    local function passType(t) if not typeSet or next(typeSet)==nil then return true end; return typeSet[tostring(t)] == true end
+    local function passMut(m)
+        m = normalizeMut(m)
+        if not mutSet or next(mutSet) == nil then return true end
+        if (m == nil or m == "") and (mutSet[""] or mutSet["-"] or mutSet["None"]) then return true end
+        return mutSet[tostring(m or "")] == true
+    end
+    local out = {}
+    for _,ch in ipairs(eg:GetChildren()) do
+        if #ch:GetChildren() == 0 then
+            local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
+            local M = ch:GetAttribute("M") or ch:GetAttribute("Mutate")
+            if passType(T) and passMut(M) then
+                out[#out+1] = { uid = ch.Name, T = tostring(T), M = normalizeMut(M) }
+                if limit and #out >= limit then break end
+            end
+        end
+    end
+    table.sort(out, function(a,b)
+        local ka = (a.T or "").."|"..(a.M or "").."|"..(a.uid or "")
+        local kb = (b.T or "").."|"..(b.M or "").."|"..(b.uid or "")
+        return ka < kb
+    end)
+    return out
+end
+
+-- ธงยกเลิกการส่ง
+local giftCancelFlag = false
+-- =========================================
+
+-- ===== Confirm utilities (Eggs) =====
 local function getEggInfo(uid)
     local eg = _eggFolder(); if not eg then return nil end
     local ch = eg:FindFirstChild(tostring(uid))
@@ -386,21 +448,18 @@ local function countEggTM(T, M)
             local t = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
             local m = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
             if tostring(t) == tostring(T) and tostring(m or "") == tostring(M or "") then
-                n += 1 -- นับเป็นชิ้นๆ (ตาม UID)
+                n += 1
             end
         end
     end
     return n
 end
 
--- รอคอนเฟิร์มว่า “ลดจริง 1 ชิ้น” (UID หายหรือยอด T|M ลด)
 local function waitConfirmEgg(uid, T, M, prevCount, timeoutSec)
     local t0 = os.clock()
     timeoutSec = timeoutSec or 3.0
     while (os.clock() - t0) <= timeoutSec do
-        -- 1) UID ต้องหาย
         if not hasEggUID(uid) then return true end
-        -- 2) หรือจำนวน T|M ลดลง 1
         if prevCount and prevCount > 0 then
             local now = countEggTM(T, M)
             if now == (prevCount - 1) then return true end
@@ -422,7 +481,7 @@ local function waitConfirmFood(name, prevCount, timeoutSec)
     return false
 end
 
--- ===== UPDATED: giftOnce (Egg) — with confirmation & backoff =====
+-- ===== giftOnce (Egg) =====
 local function giftOnce(targetPlr, eggUID)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
@@ -438,17 +497,12 @@ local function giftOnce(targetPlr, eggUID)
     local ok = false
     local delay = 0.10
     for attempt = 1, 4 do
-        -- ยิงรีโมต
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
-
-        -- ยืนยันผล
         local confirmed = waitConfirmEgg(eggUID, meta.T, meta.M, prevCount, 2.0 + attempt*0.4)
         if ok and confirmed then
             task.wait(0.10)
             return true
         end
-
-        -- ล้มเหลว: โฟกัสใหม่ + backoff แล้วลองอีก
         holdEgg(eggUID)
         task.wait(delay + attempt*0.15)
     end
@@ -456,7 +510,7 @@ local function giftOnce(targetPlr, eggUID)
     return false, "no confirm"
 end
 
--- ===== UPDATED: giftBatchFiltered (เลือกตาม T/M จำนวน N) =====
+-- ===== giftBatchFiltered (เลือกตาม T/M จำนวน N) =====
 local function giftBatchFiltered(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload and payload.Target)
@@ -478,9 +532,7 @@ local function giftBatchFiltered(sendFn, payload)
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
         local ok = giftOnce(target, egg.uid)
-        if ok then
-            sent += 1
-        end
+        if ok then sent += 1 end
         sendFn("GiftProgress", { sent=sent, total=want, label=(egg.T .. (egg.M and (" • "..egg.M) or "")) })
         task.wait(0.10)
     end
@@ -488,7 +540,7 @@ local function giftBatchFiltered(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
 
--- ===== UPDATED: giftBatchUIDs (ส่งตามรายชื่อ UID) =====
+-- ===== giftBatchUIDs (ส่งตามรายชื่อ UID) =====
 local function giftBatchUIDs(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload and payload.Target)
@@ -511,7 +563,7 @@ local function giftBatchUIDs(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
 
--- ===== UPDATED: giveFoodOnce / giftBatchFood (ยืนยันด้วย Asset attribute) =====
+-- ===== giveFoodOnce / giftBatchFood =====
 local function giveFoodOnce(targetPlr, foodName)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not foodName or foodName=="" then return false, "no food name" end
@@ -532,7 +584,6 @@ local function giveFoodOnce(targetPlr, foodName)
             task.wait(0.06)
             return true
         end
-        -- re-focus + backoff
         focusFood(foodName)
         task.wait(0.08 + attempt*0.12)
     end
@@ -556,7 +607,6 @@ local function giftBatchFood(sendFn, payload)
     sendFn("GiftProgress", { sent=0, total=want, label=foodName })
 
     while sent < want and not giftCancelFlag do
-        -- double-check stock ก่อนทุกครั้ง (กัน desync)
         if getFoodCount(foodName) <= 0 then break end
         local ok = giveFoodOnce(target, foodName)
         if ok then sent += 1 end
@@ -673,7 +723,7 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local lastGiftJson -- >>> NEW: สำหรับ diff GiftDaily
+            local lastGiftJson
             local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
 
             while self.IsConnected do
@@ -712,9 +762,9 @@ function Nexus:Connect(host)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
-                -- >>> NEW: อัปเดตยอดกิฟต์ต่อวันจาก UserFlag
+                -- >>> NEW: อัปเดตยอดกิฟต์/วัน (GPD)
                 tGift += 1
-                if tGift >= 2 then -- ทุก ~2s
+                if tGift >= 2 then
                     tGift = 0
                     local g = readGiftDaily()
                     if g then
