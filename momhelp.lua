@@ -8,6 +8,7 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - Exec (loadstring/pcall) + Log
 - Gift (Eggs: GiftStart / GiftUIDs, Foods: GiftFoodStart)
 - auto reconnect
+- NEW: SetGiftDaily (ยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -308,6 +309,22 @@ local function getFoodCount(name)
     return tonumber(v) or 0
 end
 
+-- ===== NEW: Gift daily counter (จาก PlayerGui.Data.UserFlag) =====
+local function readGiftDaily()
+    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
+
+    local usedAttr = uf:GetAttribute("TodaySendGiftCount")
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD ตามภาพ
+    local used = tonumber(usedAttr) or 0
+    local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
+
+    return { used = used, limit = 500, date = date }
+end
+-- ===== /NEW =====
+
 -- ===== 5.5) Gift helpers (Build A Zoo) =====
 local GiftRE = (function()
     local ok, remote = pcall(function()
@@ -384,9 +401,7 @@ local function waitConfirmEgg(uid, T, M, prevCount, timeoutSec)
     local t0 = os.clock()
     timeoutSec = timeoutSec or 3.0
     while (os.clock() - t0) <= timeoutSec do
-        -- 1) UID ต้องหาย
         if not hasEggUID(uid) then return true end
-        -- 2) หรือจำนวน T|M ลดลง 1
         if prevCount and prevCount > 0 then
             local now = countEggTM(T, M)
             if now == (prevCount - 1) then return true end
@@ -408,7 +423,7 @@ local function waitConfirmFood(name, prevCount, timeoutSec)
     return false
 end
 
--- ===== UPDATED: giftOnce (Egg) — with confirmation & backoff =====
+-- ===== Gift (Egg) — ใช้ของเดิมที่ทำงานดี =====
 local function giftOnce(targetPlr, eggUID)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
@@ -424,17 +439,12 @@ local function giftOnce(targetPlr, eggUID)
     local ok = false
     local delay = 0.10
     for attempt = 1, 4 do
-        -- ยิงรีโมต
         ok = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
-
-        -- ยืนยันผล
         local confirmed = waitConfirmEgg(eggUID, meta.T, meta.M, prevCount, 2.0 + attempt*0.4)
         if ok and confirmed then
             task.wait(0.10)
             return true
         end
-
-        -- ล้มเหลว: โฟกัสใหม่ + backoff แล้วลองอีก
         holdEgg(eggUID)
         task.wait(delay + attempt*0.15)
     end
@@ -442,7 +452,6 @@ local function giftOnce(targetPlr, eggUID)
     return false, "no confirm"
 end
 
--- ===== UPDATED: giftBatchFiltered (เลือกตาม T/M จำนวน N) =====
 local function giftBatchFiltered(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload and payload.Target)
@@ -474,7 +483,6 @@ local function giftBatchFiltered(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
 
--- ===== UPDATED: giftBatchUIDs (ส่งตามรายชื่อ UID) =====
 local function giftBatchUIDs(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload and payload.Target)
@@ -497,7 +505,7 @@ local function giftBatchUIDs(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
 
--- ===== UPDATED: giveFoodOnce / giftBatchFood (ยืนยันด้วย Asset attribute) =====
+-- ===== Gift (Food) — ของเดิม =====
 local function giveFoodOnce(targetPlr, foodName)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not foodName or foodName=="" then return false, "no food name" end
@@ -518,7 +526,6 @@ local function giveFoodOnce(targetPlr, foodName)
             task.wait(0.06)
             return true
         end
-        -- re-focus + backoff
         focusFood(foodName)
         task.wait(0.08 + attempt*0.12)
     end
@@ -542,7 +549,6 @@ local function giftBatchFood(sendFn, payload)
     sendFn("GiftProgress", { sent=0, total=want, label=foodName })
 
     while sent < want and not giftCancelFlag do
-        -- double-check stock ก่อนทุกครั้ง (กัน desync)
         if getFoodCount(foodName) <= 0 then break end
         local ok = giveFoodOnce(target, foodName)
         if ok then sent += 1 end
@@ -659,7 +665,8 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
+            local lastGiftJson -- NEW: diff GiftDaily
+            local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
 
             while self.IsConnected do
                 self:Send("ping", { t = os.time() })
@@ -697,6 +704,20 @@ function Nexus:Connect(host)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
+                -- NEW: อัปเดตยอดกิฟต์/วันจาก UserFlag
+                tGift += 1
+                if tGift >= 2 then -- ทุก ~2 วิ
+                    tGift = 0
+                    local g = readGiftDaily()
+                    if g then
+                        local js = HttpService:JSONEncode(g)
+                        if js ~= lastGiftJson then
+                            lastGiftJson = js
+                            self:Send("SetGiftDaily", g)
+                        end
+                    end
+                end
+
                 task.wait(1)
             end
         end
@@ -716,4 +737,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("localhost:3005")
-
