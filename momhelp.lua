@@ -721,3 +721,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 getgenv().Nexus = Nexus
 -- เปลี่ยน host ได้ เช่น "192.168.1.10:3005" หรือ domain
 Nexus:Connect("localhost:3005")
+
