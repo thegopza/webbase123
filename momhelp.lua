@@ -8,6 +8,7 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - Exec (loadstring/pcall) + Log
 - Gift (Eggs: GiftStart / GiftUIDs, Foods: GiftFoodStart)
 - auto reconnect
+- SetGiftDaily (ส่งยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -266,7 +267,6 @@ local function readEggs()
 end
 
 -- ===== 5.x) Foods Inventory (จาก PlayerGui.Data.Asset: Attributes) =====
--- รายชื่อมาตรฐาน (TitleCase) ใช้ตรวจ/แปลงแบบ case-insensitive
 local FOOD_LIST = {
   "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
   "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
@@ -285,7 +285,6 @@ local function foodsAssetFolder()
 end
 
 local function readFoods()
-    -- path: PlayerGui.Data.Asset (attributes: Apple, Banana, ... -> จำนวน)
     local asset = foodsAssetFolder(); if not asset then return {} end
     local attrs = asset:GetAttributes()
     local out = {}
@@ -300,13 +299,28 @@ local function readFoods()
     return out
 end
 
--- [Gift Food] helper: โฟลเดอร์/ยอดคงเหลืออาหาร (จาก Data.Asset)
 local function getFoodCount(name)
     local asset = foodsAssetFolder(); if not asset then return 0 end
     local canonical = canonicalFoodName(name) or tostring(name)
     local v = asset:GetAttribute(canonical)
     return tonumber(v) or 0
 end
+
+-- >>> NEW: Gift daily counter (จาก PlayerGui.Data.UserFlag)
+local function readGiftDaily()
+    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
+
+    local usedAttr = uf:GetAttribute("TodaySendGiftCount")
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer")  -- คาดว่าเป็นรูปแบบ YYYYMMDD ตามภาพ
+    local used = tonumber(usedAttr) or 0
+    local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
+
+    return { used = used, limit = 500, date = date }
+end
+-- <<< NEW
 
 -- ===== 5.5) Gift helpers (Build A Zoo) =====
 local GiftRE = (function()
@@ -627,7 +641,7 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    -- === [Gift Food] Focus ตามชื่อ + GiftRE ===
+    -- === [Gift Food] ===
     if name == "GiftFoodStart" then
         slog("[GiftFoodStart] to "..tostring(payload and payload.Target or "?").." food="..tostring(payload and payload.Food))
         task.spawn(function() giftBatchFood(function(n,p) self:Send(n,p) end, payload or {}) end)
@@ -659,7 +673,8 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
+            local lastGiftJson -- >>> NEW: สำหรับ diff GiftDaily
+            local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
 
             while self.IsConnected do
                 self:Send("ping", { t = os.time() })
@@ -675,7 +690,7 @@ function Nexus:Connect(host)
                     tInv = 0
                     self:Send("SetInventory", {
                         Eggs  = readEggs(),
-                        Foods = readFoods(), -- << ส่ง Foods จาก Data.Asset (attributes)
+                        Foods = readFoods(),
                     })
                 end
 
@@ -696,6 +711,21 @@ function Nexus:Connect(host)
                     local js = HttpService:JSONEncode(farms)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
+
+                -- >>> NEW: อัปเดตยอดกิฟต์ต่อวันจาก UserFlag
+                tGift += 1
+                if tGift >= 2 then -- ทุก ~2s
+                    tGift = 0
+                    local g = readGiftDaily()
+                    if g then
+                        local js = HttpService:JSONEncode(g)
+                        if js ~= lastGiftJson then
+                            lastGiftJson = js
+                            self:Send("SetGiftDaily", g)
+                        end
+                    end
+                end
+                -- <<< NEW
 
                 task.wait(1)
             end
