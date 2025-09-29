@@ -1,14 +1,14 @@
 --[[
-Nexus (full) — WS <-> Backend (port 3005)
+Nexus (lite) — WS <-> Backend (port 3005)
 - ping 1s
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
 - inventory 5s (Egg + Food via PlayerGui.Data.Asset attributes)
 - farm status 6s (OccupyingPlayerId + ป้องกันนับซ้ำ/ฟิลเตอร์ขนาด)
 - Exec (loadstring/pcall) + Log
-- Gift (Eggs: GiftStart / GiftUIDs พร้อม confirm ว่าลดจริง, Foods: GiftFoodStart พร้อม confirm ว่าลด count)
-- GiftStop ยกเลิกกลางคัน
+- Gift (Eggs: GiftStart / GiftUIDs, Foods: GiftFoodStart)
 - auto reconnect
+- SetGiftDaily (ส่งยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -38,22 +38,8 @@ while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 local DEBUG = false
 local function dprint(...) if DEBUG then print("[Nexus]", ...) end end
 
--- ===== Small utils =====
-local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
-local function nowsec() return os.time() end
-local function waitFor(pred, timeout, step)
-    timeout = timeout or 2.5
-    step = step or 0.05
-    local t0 = tick()
-    while tick() - t0 < timeout do
-        local ok, res = pcall(pred)
-        if ok and res then return true end
-        task.wait(step)
-    end
-    return false
-end
-
 -- ===== Helpers: Character snapshot =====
+local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
 local function getCharacterSnapshot()
     local char = LocalPlayer.Character
     if not char then return nil end
@@ -97,8 +83,8 @@ local function islandOwnedByUser(island, uid)
         if node.GetAttribute then
             local v = node:GetAttribute("OccupyingPlayerId")
             if v ~= nil then
-                local n2 = (typeof(v)=="string") and tonumber(v) or v
-                if typeof(n2)=="number" and n2 == uid then return true end
+                local n = (typeof(v)=="string") and tonumber(v) or v
+                if typeof(n)=="number" and n == uid then return true end
             end
         end
     end
@@ -265,15 +251,12 @@ local function buildRoster()
 end
 
 -- ===== 5) Egg Inventory (จาก PlayerGui.Data.Egg) =====
-local function eggFolder()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    local data = pg and pg:FindFirstChild("Data")
-    return data and data:FindFirstChild("Egg") or nil
-end
 local function readEggs()
-    local eg = eggFolder(); if not eg then return {} end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return {} end
+    local data = pg:FindFirstChild("Data");            if not data then return {} end
+    local eggFolder = data:FindFirstChild("Egg");      if not eggFolder then return {} end
     local list = {}
-    for _, ch in ipairs(eg:GetChildren()) do
+    for _, ch in ipairs(eggFolder:GetChildren()) do
         local T = ch:GetAttribute("T") or ch:GetAttribute("Type")
         local M = ch:GetAttribute("M") or ch:GetAttribute("Mutate")
         local nameAttr = ch:GetAttribute("Name") or ch.Name
@@ -292,38 +275,61 @@ local FOOD_LIST = {
 local FOOD_SET = {}; for _,n in ipairs(FOOD_LIST) do FOOD_SET[string.lower(n)] = n end
 local function canonicalFoodName(input)
     if not input or input=="" then return nil end
-    local k = string.lower(tostring(input)); return FOOD_SET[k] or input
+    local k = string.lower(tostring(input)); return FOOD_SET[k]
 end
+
 local function foodsAssetFolder()
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local data = pg:FindFirstChild("Data");                       if not data then return nil end
     return data:FindFirstChild("Asset")
 end
+
 local function readFoods()
     local asset = foodsAssetFolder(); if not asset then return {} end
     local attrs = asset:GetAttributes()
     local out = {}
     for name, val in pairs(attrs) do
-        local canonical = canonicalFoodName(name)
+        local canonical = canonicalFoodName(name) or tostring(name)
         local n = tonumber(val) or 0
-        if n > 0 then out[#out+1] = { name = tostring(canonical), count = n } end
+        if n > 0 then
+            out[#out+1] = { name = canonical, count = n }
+        end
     end
     table.sort(out, function(a,b) return tostring(a.name):lower() < tostring(b.name):lower() end)
     return out
 end
+
 local function getFoodCount(name)
     local asset = foodsAssetFolder(); if not asset then return 0 end
-    local canonical = canonicalFoodName(name)
-    return tonumber(asset:GetAttribute(tostring(canonical))) or 0
+    local canonical = canonicalFoodName(name) or tostring(name)
+    local v = asset:GetAttribute(canonical)
+    return tonumber(v) or 0
 end
 
--- ===== 5.5) Gift remotes =====
+-- >>> NEW: Gift daily counter (จาก PlayerGui.Data.UserFlag)
+local function readGiftDaily()
+    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
+
+    local usedAttr = uf:GetAttribute("TodaySendGiftCount")
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer")  -- คาดว่าเป็นรูปแบบ YYYYMMDD ตามภาพ
+    local used = tonumber(usedAttr) or 0
+    local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
+
+    return { used = used, limit = 500, date = date }
+end
+-- <<< NEW
+
+-- ===== 5.5) Gift helpers (Build A Zoo) =====
 local GiftRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("GiftRE")
     end)
     return ok and remote or nil
 end)()
+
 local CharacterRE = (function()
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE")
@@ -331,12 +337,12 @@ local CharacterRE = (function()
     return ok and remote or nil
 end)()
 
--- ===== Movement / focus helpers =====
 local function getHRP(plr)
     plr = plr or LocalPlayer
     local ch = plr and plr.Character
     return ch and ch:FindFirstChild("HumanoidRootPart")
 end
+
 local function teleportNear(targetPlr, offset)
     offset = offset or 1.6
     local myHRP, tgHRP = getHRP(LocalPlayer), getHRP(targetPlr)
@@ -349,6 +355,7 @@ local function teleportNear(targetPlr, offset)
     task.wait(0.08)
     return true
 end
+
 local function tap(key)
     VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.04)
     VirtualInputManager:SendKeyEvent(false, key, false, game)
@@ -630,14 +637,13 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    -- === GIFT: Food by name ===
+    -- === [Gift Food] ===
     if name == "GiftFoodStart" then
         slog("[GiftFoodStart] to "..tostring(payload and payload.Target or "?").." food="..tostring(payload and payload.Food))
         task.spawn(function() giftBatchFood(function(n,p) self:Send(n,p) end, payload or {}) end)
         return
     end
 
-    -- === Cancel ===
     if name == "GiftStop" then giftCancelFlag = true; slog("[Gift] cancel requested"); return end
 end
 
@@ -663,10 +669,11 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
+            local lastGiftJson -- >>> NEW: สำหรับ diff GiftDaily
+            local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
 
             while self.IsConnected do
-                self:Send("ping", { t = nowsec() })
+                self:Send("ping", { t = os.time() })
 
                 local m = detectMoney()
                 if m and m ~= lastMoney then lastMoney = m; self:Send("SetMoney", { Content = tostring(m) }) end
@@ -701,6 +708,21 @@ function Nexus:Connect(host)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
+                -- >>> NEW: อัปเดตยอดกิฟต์ต่อวันจาก UserFlag
+                tGift += 1
+                if tGift >= 2 then -- ทุก ~2s
+                    tGift = 0
+                    local g = readGiftDaily()
+                    if g then
+                        local js = HttpService:JSONEncode(g)
+                        if js ~= lastGiftJson then
+                            lastGiftJson = js
+                            self:Send("SetGiftDaily", g)
+                        end
+                    end
+                end
+                -- <<< NEW
+
                 task.wait(1)
             end
         end
@@ -719,5 +741,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
--- เปลี่ยน host ได้ เช่น "192.168.1.10:3005" หรือ domain
 Nexus:Connect("localhost:3005")
