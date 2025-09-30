@@ -9,6 +9,7 @@ Nexus (full) — WS <-> Backend (port 3005)
 - Gift (Eggs: GiftStart / GiftUIDs พร้อม confirm ว่าลดจริง, Foods: GiftFoodStart พร้อม confirm ว่าลด count)
 - GiftStop ยกเลิกกลางคัน
 - auto reconnect
+- NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -264,7 +265,7 @@ local function buildRoster()
     return list
 end
 
--- ===== 5) Egg Inventory (จาก PlayerGui.Data.Egg) =====
+-- ===== 5) Egg Inventory =====
 local function eggFolder()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
@@ -283,7 +284,7 @@ local function readEggs()
     return list
 end
 
--- ===== 5.x) Foods Inventory (จาก PlayerGui.Data.Asset: Attributes) =====
+-- ===== 5.x) Foods Inventory =====
 local FOOD_LIST = {
   "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
   "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
@@ -316,6 +317,20 @@ local function getFoodCount(name)
     local canonical = canonicalFoodName(name)
     return tonumber(asset:GetAttribute(tostring(canonical))) or 0
 end
+
+-- ===== NEW: Gift daily counter (UserFlag) =====
+local function readGiftDaily()
+    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
+    local usedAttr = uf:GetAttribute("TodaySendGiftCount")
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD
+    local used = tonumber(usedAttr) or 0
+    local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
+    return { used = used, limit = 500, date = date }
+end
+-- ===== /NEW =====
 
 -- ===== 5.5) Gift remotes =====
 local GiftRE = (function()
@@ -357,15 +372,11 @@ end
 -- Eggs: focus/hold
 local function holdEgg(uid)
     if not uid then return end
-
-    -- โฟกัสโดยตรงถ้า CharacterRE มีให้ใช้
     if CharacterRE then
         local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(uid)) end)
         if not ok then ok = pcall(function() CharacterRE:FireServer("Focus", "Egg_" .. tostring(uid)) end) end
         if ok then task.wait(0.70); return end
     end
-
-    -- fallback: Deploy + key taps
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
@@ -378,14 +389,11 @@ end
 local function focusFood(name)
     if not name or name=="" then return false end
     local canonical = canonicalFoodName(name)
-
     if CharacterRE then
         local ok = pcall(function() CharacterRE:FireServer("Focus", tostring(canonical)) end)
         if not ok then ok = pcall(function() CharacterRE:FireServer("Focus", "Food_" .. tostring(canonical)) end) end
         if ok then task.wait(0.18); return true end
     end
-
-    -- fallback: Deploy + key taps
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
@@ -426,19 +434,15 @@ end
 local function giftOnceEgg(targetPlr, eggUID)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not eggUID then return false, "no egg uid" end
-
     teleportNear(targetPlr, 1.6)
     holdEgg(eggUID)
-    task.wait(0.60) -- เว้นให้ state ถือของนิ่ง
-
-    -- ทำสูงสุด 3 รอบ, แต่ละรอบยิง + รอ confirm ว่า uid หาย
+    task.wait(0.60)
     for attempt = 1, 3 do
         local fired = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if fired then
             local ok = confirmEggRemoved(eggUID, 2.2 + 0.5 * attempt)
             if ok then return true end
         end
-        -- ย้ำโฟกัสแล้วลองใหม่
         holdEgg(eggUID)
         task.wait(0.40 + 0.30 * attempt)
     end
@@ -449,15 +453,12 @@ end
 local function giftOnceFood(targetPlr, foodName)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not foodName or foodName=="" then return false, "no food name" end
-
     local before = getFoodCount(foodName)
     if before <= 0 then return false, "no stock" end
-
     teleportNear(targetPlr, 1.6)
     local focused = focusFood(foodName)
     if not focused then return false, "focus failed" end
     task.wait(0.10)
-
     for attempt = 1, 3 do
         local fired = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if fired then
@@ -663,7 +664,8 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local tRoster, tInv, tChar, tFarm = 0, 0, 0, 0
+            local lastGiftJson -- NEW: diff GiftDaily
+            local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
 
             while self.IsConnected do
                 self:Send("ping", { t = nowsec() })
@@ -701,6 +703,20 @@ function Nexus:Connect(host)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
+                -- NEW: ส่งยอด Gift/Day แบบไม่ยุ่งกับระบบ Gift เดิม
+                tGift += 1
+                if tGift >= 2 then
+                    tGift = 0
+                    local g = readGiftDaily()
+                    if g then
+                        local js = HttpService:JSONEncode(g)
+                        if js ~= lastGiftJson then
+                            lastGiftJson = js
+                            self:Send("SetGiftDaily", g)
+                        end
+                    end
+                end
+
                 task.wait(1)
             end
         end
@@ -719,5 +735,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
--- เปลี่ยน host ได้ เช่น "192.168.1.10:3005" หรือ domain
 Nexus:Connect("localhost:3005")
