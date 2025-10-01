@@ -11,6 +11,7 @@ Nexus (full) — WS <-> Backend (port 3005)
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
 - NEW: Pet Farm Value (อ่านค่าจาก GUI ScreenPlayerInfo)
+- UPDATED: Pet Farm Value can now be triggered remotely by the web dashboard.
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -66,19 +67,114 @@ local function parseNumberLikeText(s)
     return n
 end
 
--- ===== read "Pet Farm Value" from GUI =====
-local function readPetFarmValue()
+-- [[ A) เพิ่ม HELPER FUNCTIONS ใหม่ตามคำสั่ง ]] --
+-- ===== Info Panel helpers (open → read → close) =====
+local function getInfoGui()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
+    local frame = gui:FindFirstChild("Frame")
+    return gui, frame
+end
+
+local function isInfoOpen()
+    local gui, frame = getInfoGui()
+    if not gui then return false end
+    if gui:IsA("ScreenGui") and gui.Enabled ~= nil and gui.Enabled then return true end
+    if frame and frame.Visible ~= nil and frame.Visible then return true end
+    local content = frame and frame:FindFirstChild("Content")
+    if content and content.AbsoluteSize.Y > 5 then return true end
+    return false
+end
+
+local function toggleInfoByButton()
+    local gui, frame = getInfoGui(); if not (gui and frame) then return false end
+    local btn = gui:FindFirstChild("Open", true)
+            or gui:FindFirstChild("Toggle", true)
+            or gui:FindFirstChild("Button", true)
+            or frame:FindFirstChildWhichIsA("TextButton", true)
+            or frame:FindFirstChildWhichIsA("ImageButton", true)
+    if not btn then return false end
+    local pos = btn.AbsolutePosition + btn.AbsoluteSize/2
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+    end)
+    return true
+end
+
+local function setInfoOpen(wantOpen)
+    local gui, frame = getInfoGui(); if not gui then return false end
+    local opened = isInfoOpen()
+    if wantOpen == opened then return true end
+
+    if gui:IsA("ScreenGui") and gui.Enabled ~= nil then
+        gui.Enabled = wantOpen; task.wait(0.05); return isInfoOpen()
+    end
+    if frame and frame.Visible ~= nil then
+        frame.Visible = wantOpen; task.wait(0.05); return isInfoOpen()
+    end
+    if toggleInfoByButton() then
+        task.wait(0.10)
+        return isInfoOpen()
+    end
+    return false
+end
+
+-- อ่านค่าในครั้งเดียว (ต้องเปิดป้ายไว้แล้ว)
+local function readPetFarmValue_once()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
     local frame = gui:FindFirstChild("Frame"); if not frame then return nil end
     local content = frame:FindFirstChild("Content"); if not content then return nil end
     local info1 = content:FindFirstChild("info1"); if not info1 then return nil end
     local title2 = info1:FindFirstChild("Title2")
-    if title2 and (title2:IsA("TextLabel") or title2:IsA("TextButton")) then
-        return parseNumberLikeText(title2.Text)
+
+    local function numberFrom(inst)
+        if not inst then return nil end
+        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+            local n = parseNumberLikeText(inst.Text); if n and n > 0 then return n end
+        end
+        local child = inst:FindFirstChild("Text") or inst:FindFirstChild("text")
+                    or inst:FindFirstChild("Label")
+                    or inst:FindFirstChildWhichIsA("TextLabel", true)
+                    or inst:FindFirstChildWhichIsA("TextButton", true)
+        if child and (child:IsA("TextLabel") or child:IsA("TextButton")) then
+            local n = parseNumberLikeText(child.Text); if n and n > 0 then return n end
+        end
+        return nil
     end
-    return nil
+
+    local n1 = numberFrom(title2)
+    if n1 and n1 > 0 then return n1 end
+
+    local best
+    for _,d in ipairs(info1:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local n = parseNumberLikeText(d.Text)
+            if n and n > 0 and (not best or n > best) then best = n end
+        end
+    end
+    return best
 end
+
+-- [[ B) แทนที่ฟังก์ชัน readPetFarmValue() เดิม ]] --
+-- แทนที่ฟังก์ชันเดิมทั้งก้อน
+local function readPetFarmValue()
+    local alreadyOpen = isInfoOpen()
+    if not alreadyOpen then
+        if not setInfoOpen(true) then return nil end
+        task.wait(0.15)  -- เผื่อเวลาเกมเติมตัวเลข
+    end
+
+    local v = readPetFarmValue_once()
+
+    -- ปิดคืนถ้าเราเป็นคนเปิด
+    if not alreadyOpen and isInfoOpen() then
+        setInfoOpen(false)
+    end
+    return v
+end
+
 
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
@@ -89,7 +185,7 @@ local function getCharacterSnapshot()
     local pos = hrp and hrp.Position
     return {
         characterName = char.Name,
-        health      = hum and hum.Health or nil,
+        health        = hum and hum.Health or nil,
         maxHealth = hum and hum.MaxHealth or nil,
         position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
     }
@@ -643,6 +739,20 @@ local function onSocketMessage(self, raw)
         return
     end
 
+    -- [[ C) เพิ่ม HANDLER สำหรับ PetValueRefresh ]] --
+    -- === (ใหม่) สั่ง refresh ค่า Pet Farm Value แบบ on-demand ===
+    if name == "PetValueRefresh" then
+        task.spawn(function()
+            local v = readPetFarmValue()
+            if v then
+                self:Send("SetPetFarmValue", { value = v, source = "manual" })
+            else
+                self:Send("Log", { Content = "[PetValue] refresh failed (nil)" })
+            end
+        end)
+        return
+    end
+
     -- === GIFT: Filter-based (T/M/Amount) ===
     if name == "GiftStart" then
         slog("[GiftStart] to "..tostring(payload and payload.Target or "?"))
@@ -774,4 +884,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
-
