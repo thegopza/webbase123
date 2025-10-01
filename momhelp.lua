@@ -11,6 +11,7 @@ Nexus (full) — WS <-> Backend (port 3005)
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
 - NEW: Pet Farm Value (อ่านค่าจาก GUI ScreenPlayerInfo)
+- NEW: Pet Value from OwnedPetData (probe + sum) with refresh support
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -66,107 +67,89 @@ local function parseNumberLikeText(s)
     return n
 end
 
--- ===== Info Panel helpers (open → read → close) =====
-local function getInfoGui()
-    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
-    local frame = gui:FindFirstChild("Frame")
-    return gui, frame
-end
-local function isInfoOpen()
-    local gui, frame = getInfoGui()
-    if not gui then return false end
-    if gui:IsA("ScreenGui") and gui.Enabled ~= nil and gui.Enabled then return true end
-    if frame and frame.Visible ~= nil and frame.Visible then return true end
-    local content = frame and frame:FindFirstChild("Content")
-    if content and content.AbsoluteSize.Y > 5 then return true end
-    return false
-end
-local function toggleInfoByButton()
-    local gui, frame = getInfoGui(); if not (gui and frame) then return false end
-    local btn = gui:FindFirstChild("Open", true)
-            or gui:FindFirstChild("Toggle", true)
-            or gui:FindFirstChild("Button", true)
-            or frame:FindFirstChildWhichIsA("TextButton", true)
-            or frame:FindFirstChildWhichIsA("ImageButton", true)
-    if not btn then return false end
-    local pos = btn.AbsolutePosition + btn.AbsoluteSize/2
-    pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
-    return true
-end
-local function setInfoOpen(wantOpen)
-    local gui, frame = getInfoGui(); if not gui then return false end
-    local opened = isInfoOpen()
-    if wantOpen == opened then return true end
-
-    if gui:IsA("ScreenGui") and gui.Enabled ~= nil then
-        gui.Enabled = wantOpen; task.wait(0.05); return isInfoOpen()
-    end
-    if frame and frame.Visible ~= nil then
-        frame.Visible = wantOpen; task.wait(0.05); return isInfoOpen()
-    end
-    if toggleInfoByButton() then
-        task.wait(0.10)
-        return isInfoOpen()
-    end
-    return false
-end
--- อ่านค่าในครั้งเดียว (ต้องเปิดป้ายไว้แล้ว)
-local function readPetFarmValue_once()
+-- ===== read "Pet Farm Value" from GUI =====
+local function readPetFarmValue()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
     local frame = gui:FindFirstChild("Frame"); if not frame then return nil end
     local content = frame:FindFirstChild("Content"); if not content then return nil end
     local info1 = content:FindFirstChild("info1"); if not info1 then return nil end
     local title2 = info1:FindFirstChild("Title2")
-
-    local function numberFrom(inst)
-        if not inst then return nil end
-        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
-            local n = parseNumberLikeText(inst.Text); if n and n > 0 then return n end
-        end
-        local child = inst:FindFirstChild("Text") or inst:FindFirstChild("text")
-                    or inst:FindFirstChild("Label")
-                    or inst:FindFirstChildWhichIsA("TextLabel", true)
-                    or inst:FindFirstChildWhichIsA("TextButton", true)
-        if child and (child:IsA("TextLabel") or child:IsA("TextButton")) then
-            local n = parseNumberLikeText(child.Text); if n and n > 0 then return n end
-        end
-        return nil
+    if title2 and (title2:IsA("TextLabel") or title2:IsA("TextButton")) then
+        return parseNumberLikeText(title2.Text)
     end
-
-    local n1 = numberFrom(title2)
-    if n1 and n1 > 0 then return n1 end
-
-    local best
-    for _,d in ipairs(info1:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local n = parseNumberLikeText(d.Text)
-            if n and n > 0 and (not best or n > best) then best = n end
-        end
-    end
-    return best
+    return nil
 end
 
--- แทนที่ฟังก์ชันเดิมทั้งก้อน
-local function readPetFarmValue()
-    local alreadyOpen = isInfoOpen()
-    if not alreadyOpen then
-        if not setInfoOpen(true) then return nil end
-        task.wait(0.15)  -- เผื่อเวลาเกมเติมตัวเลข
-    end
-
-    local v = readPetFarmValue_once()
-
-    -- ปิดคืนถ้าเราเป็นคนเปิด
-    if not alreadyOpen and isInfoOpen() then
-        setInfoOpen(false)
-    end
-    return v
+-- ===== Pet Value: probe + sum =====
+local function findOwnedPetData()
+    -- พยายามหา container ของข้อมูลสัตว์ให้ได้มากที่สุดแบบ best-effort
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+    local data = pg and pg:FindFirstChild("Data")
+    local cand = {
+        data and data:FindFirstChild("OwnedPetData"),
+        pg   and pg :FindFirstChild("OwnedPetData"),
+        ReplicatedStorage:FindFirstChild("OwnedPetData"),
+        LocalPlayer:FindFirstChild("OwnedPetData"),
+        Workspace:FindFirstChild("OwnedPetData"),
+    }
+    for _,v in ipairs(cand) do if v then return v end end
+    return nil
 end
+-- สแกนหาคีย์ที่น่าจะเป็น value (เช่น "Value","V","Power" ฯลฯ)
+local PREFERRED_KEYS = { "Value","V","Power","Score","Price" }
+local function probePetValueKey(opd)
+    opd = opd or findOwnedPetData()
+    if not opd then return nil end
+
+    -- 1) ถ้าเจอคีย์ที่คุ้นเคยในตัวอย่างแรกๆ ให้ใช้ทันที
+    for _,node in ipairs(opd:GetChildren()) do
+        local attrs = node.GetAttributes and node:GetAttributes()
+        if attrs then
+            for _,k in ipairs(PREFERRED_KEYS) do
+                local v = attrs[k]
+                if typeof(v) == "number" then return k end
+            end
+        end
+    end
+
+    -- 2) ไม่เจอ → นับความถี่ของ numeric attributes ทั้งหมดแล้วเลือกตัวที่พบบ่อยสุด
+    local freq = {}
+    for _,node in ipairs(opd:GetChildren()) do
+        local attrs = node.GetAttributes and node:GetAttributes()
+        if attrs then
+            for k,v in pairs(attrs) do
+                if typeof(v)=="number" then
+                    freq[k] = (freq[k] or 0) + 1
+                end
+            end
+        end
+    end
+    local bestK, bestN = nil, -1
+    for k,n in pairs(freq) do
+        if n > bestN then bestN, bestK = n, k end
+    end
+    return bestK
+end
+-- รวม value ของสัตว์ทุกตัวจาก OwnedPetData ตามคีย์ที่ได้
+local function sumAllPetValue(valueKey)
+    local opd = findOwnedPetData()
+    if not opd then return nil end
+    local key = valueKey or probePetValueKey(opd)
+    if not key then return nil end
+    local s = 0
+    for _,node in ipairs(opd:GetChildren()) do
+        local v = node:GetAttribute(key)
+                  or node:GetAttribute("Value")
+                  or node:GetAttribute("V")
+                  or node:GetAttribute("Power")
+                  or node:GetAttribute("Score")
+                  or node:GetAttribute("Price")
+        if typeof(v)=="number" then s += v end
+    end
+    return s, key
+end
+
 
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
@@ -400,9 +383,9 @@ end
 
 -- ===== 5.x) Foods Inventory =====
 local FOOD_LIST = {
- "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
- "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
- "Orange","Pear","Pineapple","Strawberry","VoltGinkgo","Watermelon"
+  "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
+  "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
+  "Orange","Pear","Pineapple","Strawberry","VoltGinkgo","Watermelon"
 }
 local FOOD_SET = {}; for _,n in ipairs(FOOD_LIST) do FOOD_SET[string.lower(n)] = n end
 local function canonicalFoodName(input)
@@ -731,16 +714,17 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    -- === (ใหม่) สั่ง refresh ค่า Pet Farm Value แบบ on-demand ===
     if name == "PetValueRefresh" then
-        task.spawn(function()
-            local v = readPetFarmValue()
-            if v then
-                self:Send("SetPetFarmValue", { value = v, source = "manual" })
-            else
-                self:Send("Log", { Content = "[PetValue] refresh failed (nil)" })
-            end
-        end)
+        -- คำนวณแบบฉับพลัน แล้วส่งให้ทันที
+        local total, key = sumAllPetValue(self.petValueKey) -- Use self.petValueKey to access state
+        if total then
+            self.petValueKey = key or self.petValueKey
+            self.lastPetValue = total
+            self:Send("SetPetValue", { total = total, key = self.petValueKey })
+            self:Send("Log", { Content = ("[PetValue] total=%s key=%s"):format(tostring(total), tostring(self.petValueKey)) })
+        else
+            self:Send("Log", { Content = "[PetValue] not found (OwnedPetData/key missing)" })
+        end
         return
     end
 
@@ -783,7 +767,7 @@ function Nexus:Connect(host)
             self.Socket = sock; self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
 
-            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
+            if sock.OnClose      then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
             if sock.OnMessage then sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end) end
 
             -- ส่งค่าพื้นฐาน
@@ -793,6 +777,9 @@ function Nexus:Connect(host)
             local lastMoney, lastFarmsJson, lastCharJson
             local lastGiftJson -- NEW: diff GiftDaily
             local lastPetFarmVal
+            local lastPetValue, petValueKey = nil, nil  -- NEW from instructions
+            self.lastPetValue, self.petValueKey = lastPetValue, petValueKey -- Make accessible in onSocketMessage
+
             local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
             while self.IsConnected do
@@ -845,15 +832,21 @@ function Nexus:Connect(host)
                     end
                 end
 
-                -- === Pet Farm Value (จาก ScreenPlayerInfo.info1.Title2) ===
+                -- NEW: Pet Value from OwnedPetData
                 tPet += 1
-                if tPet >= 2 then -- ทุก ~2 วินาที
+                if tPet >= 5 then
                     tPet = 0
-                    local pv = readPetFarmValue()
-                    if pv and pv ~= lastPetFarmVal then
-                        lastPetFarmVal = pv
-                        self:Send("SetPetFarmValue", { value = pv })
+                    local total, key = sumAllPetValue(petValueKey)
+                    if not total then total, key = readPetFarmValue(), "GUI" end -- Optional fallback
+                    if total then
+                        petValueKey = key or petValueKey
+                        if total ~= lastPetValue then
+                            lastPetValue = total
+                            self:Send("SetPetValue", { total = total, key = petValueKey })
+                        end
                     end
+                    -- Update shared state for onSocketMessage
+                    self.lastPetValue, self.petValueKey = lastPetValue, petValueKey
                 end
 
                 task.wait(1)
