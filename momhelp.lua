@@ -10,6 +10,7 @@ Nexus (full) — WS <-> Backend (port 3005)
 - GiftStop ยกเลิกกลางคัน
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
+- NEW: Pet Farm Value (อ่านค่าจาก GUI ScreenPlayerInfo)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -54,6 +55,31 @@ local function waitFor(pred, timeout, step)
     return false
 end
 
+-- ===== helper: parse number with commas =====
+local function parseNumberLikeText(s)
+    if s == nil then return nil end
+    if typeof(s) == "number" then return s end
+    s = tostring(s)
+    -- เก็บเฉพาะ 0-9 . และ -
+    s = s:gsub("[^%d%.-]", "")
+    local n = tonumber(s)
+    return n
+end
+
+-- ===== read "Pet Farm Value" from GUI =====
+local function readPetFarmValue()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
+    local frame = gui:FindFirstChild("Frame"); if not frame then return nil end
+    local content = frame:FindFirstChild("Content"); if not content then return nil end
+    local info1 = content:FindFirstChild("info1"); if not info1 then return nil end
+    local title2 = info1:FindFirstChild("Title2")
+    if title2 and (title2:IsA("TextLabel") or title2:IsA("TextButton")) then
+        return parseNumberLikeText(title2.Text)
+    end
+    return nil
+end
+
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
     local char = LocalPlayer.Character
@@ -63,7 +89,7 @@ local function getCharacterSnapshot()
     local pos = hrp and hrp.Position
     return {
         characterName = char.Name,
-        health    = hum and hum.Health or nil,
+        health      = hum and hum.Health or nil,
         maxHealth = hum and hum.MaxHealth or nil,
         position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
     }
@@ -297,7 +323,7 @@ local function canonicalFoodName(input)
 end
 local function foodsAssetFolder()
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                       if not data then return nil end
+    local data = pg:FindFirstChild("Data");                         if not data then return nil end
     return data:FindFirstChild("Asset")
 end
 local function readFoods()
@@ -322,8 +348,8 @@ end
 local function readGiftDaily()
     -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                       if not data then return nil end
-    local uf   = data:FindFirstChild("UserFlag");                 if not uf then return nil end
+    local data = pg:FindFirstChild("Data");                         if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                   if not uf then return nil end
     local usedAttr = uf:GetAttribute("TodaySendGiftCount")
     local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD
     local used = tonumber(usedAttr) or 0
@@ -656,7 +682,7 @@ function Nexus:Connect(host)
             self.Socket = sock; self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
 
-            if sock.OnClose   then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
+            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
             if sock.OnMessage then sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end) end
 
             -- ส่งค่าพื้นฐาน
@@ -665,7 +691,8 @@ function Nexus:Connect(host)
 
             local lastMoney, lastFarmsJson, lastCharJson
             local lastGiftJson -- NEW: diff GiftDaily
-            local tRoster, tInv, tChar, tFarm, tGift = 0, 0, 0, 0, 0
+            local lastPetFarmVal
+            local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
             while self.IsConnected do
                 self:Send("ping", { t = nowsec() })
@@ -714,6 +741,17 @@ function Nexus:Connect(host)
                             lastGiftJson = js
                             self:Send("SetGiftDaily", g)
                         end
+                    end
+                end
+
+                -- === Pet Farm Value (จาก ScreenPlayerInfo.info1.Title2) ===
+                tPet += 1
+                if tPet >= 2 then -- ทุก ~2 วินาที
+                    tPet = 0
+                    local pv = readPetFarmValue()
+                    if pv and pv ~= lastPetFarmVal then
+                        lastPetFarmVal = pv
+                        self:Send("SetPetFarmValue", { value = pv })
                     end
                 end
 
