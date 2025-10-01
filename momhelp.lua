@@ -592,7 +592,7 @@ local function makeRoomName()
 end
 
 -- ===== 7) WS Manager =====
-local Nexus = { Host = "localhost:3005", Path = "/Nexus", IsConnected = false, Socket = nil }
+local Nexus = { Host = "test888.ddns.net:3005", Path = "/Nexus", IsConnected = false, Socket = nil }
 function Nexus:Send(Name, Payload)
     if not (self.Socket and self.IsConnected) then return end
     local ok, msg = pcall(function() return HttpService:JSONEncode({ Name = Name, Payload = Payload }) end)
@@ -773,4 +773,5 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
-Nexus:Connect("localhost:3005")
+Nexus:Connect("test888.ddns.net:3005")
+
