@@ -61,120 +61,24 @@ local function parseNumberLikeText(s)
     if s == nil then return nil end
     if typeof(s) == "number" then return s end
     s = tostring(s)
-    -- เก็บเฉพาะ 0-9 . และ -
     s = s:gsub("[^%d%.-]", "")
     local n = tonumber(s)
     return n
 end
 
--- [[ A) เพิ่ม HELPER FUNCTIONS ใหม่ตามคำสั่ง ]] --
--- ===== Info Panel helpers (open → read → close) =====
-local function getInfoGui()
-    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
-    local frame = gui:FindFirstChild("Frame")
-    return gui, frame
-end
-
-local function isInfoOpen()
-    local gui, frame = getInfoGui()
-    if not gui then return false end
-    if gui:IsA("ScreenGui") and gui.Enabled ~= nil and gui.Enabled then return true end
-    if frame and frame.Visible ~= nil and frame.Visible then return true end
-    local content = frame and frame:FindFirstChild("Content")
-    if content and content.AbsoluteSize.Y > 5 then return true end
-    return false
-end
-
-local function toggleInfoByButton()
-    local gui, frame = getInfoGui(); if not (gui and frame) then return false end
-    local btn = gui:FindFirstChild("Open", true)
-            or gui:FindFirstChild("Toggle", true)
-            or gui:FindFirstChild("Button", true)
-            or frame:FindFirstChildWhichIsA("TextButton", true)
-            or frame:FindFirstChildWhichIsA("ImageButton", true)
-    if not btn then return false end
-    local pos = btn.AbsolutePosition + btn.AbsoluteSize/2
-    pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
-    return true
-end
-
-local function setInfoOpen(wantOpen)
-    local gui, frame = getInfoGui(); if not gui then return false end
-    local opened = isInfoOpen()
-    if wantOpen == opened then return true end
-
-    if gui:IsA("ScreenGui") and gui.Enabled ~= nil then
-        gui.Enabled = wantOpen; task.wait(0.05); return isInfoOpen()
-    end
-    if frame and frame.Visible ~= nil then
-        frame.Visible = wantOpen; task.wait(0.05); return isInfoOpen()
-    end
-    if toggleInfoByButton() then
-        task.wait(0.10)
-        return isInfoOpen()
-    end
-    return false
-end
-
--- อ่านค่าในครั้งเดียว (ต้องเปิดป้ายไว้แล้ว)
-local function readPetFarmValue_once()
+-- ===== read "Pet Farm Value" from GUI =====
+local function readPetFarmValue()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
     local frame = gui:FindFirstChild("Frame"); if not frame then return nil end
     local content = frame:FindFirstChild("Content"); if not content then return nil end
     local info1 = content:FindFirstChild("info1"); if not info1 then return nil end
     local title2 = info1:FindFirstChild("Title2")
-
-    local function numberFrom(inst)
-        if not inst then return nil end
-        if inst:IsA("TextLabel") or inst:IsA("TextButton") then
-            local n = parseNumberLikeText(inst.Text); if n and n > 0 then return n end
-        end
-        local child = inst:FindFirstChild("Text") or inst:FindFirstChild("text")
-                    or inst:FindFirstChild("Label")
-                    or inst:FindFirstChildWhichIsA("TextLabel", true)
-                    or inst:FindFirstChildWhichIsA("TextButton", true)
-        if child and (child:IsA("TextLabel") or child:IsA("TextButton")) then
-            local n = parseNumberLikeText(child.Text); if n and n > 0 then return n end
-        end
-        return nil
+    if title2 and (title2:IsA("TextLabel") or title2:IsA("TextButton")) then
+        return parseNumberLikeText(title2.Text)
     end
-
-    local n1 = numberFrom(title2)
-    if n1 and n1 > 0 then return n1 end
-
-    local best
-    for _,d in ipairs(info1:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local n = parseNumberLikeText(d.Text)
-            if n and n > 0 and (not best or n > best) then best = n end
-        end
-    end
-    return best
+    return nil
 end
-
--- [[ B) แทนที่ฟังก์ชัน readPetFarmValue() เดิม ]] --
--- แทนที่ฟังก์ชันเดิมทั้งก้อน
-local function readPetFarmValue()
-    local alreadyOpen = isInfoOpen()
-    if not alreadyOpen then
-        if not setInfoOpen(true) then return nil end
-        task.wait(0.15)  -- เผื่อเวลาเกมเติมตัวเลข
-    end
-
-    local v = readPetFarmValue_once()
-
-    -- ปิดคืนถ้าเราเป็นคนเปิด
-    if not alreadyOpen and isInfoOpen() then
-        setInfoOpen(false)
-    end
-    return v
-end
-
 
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
@@ -333,6 +237,7 @@ local function readFarmStatus()
     return { Land={filled=landFilled,total=landTotal}, Water={filled=waterFilled,total=waterTotal} }
 end
 
+
 -- ===== 3) ยูทิลอ่าน "เงินรวม" =====
 local CURRENCY_CANDIDATES = { "Money","Cash","Coins","Gold","Gems" }
 local function toNumber(s)
@@ -378,6 +283,7 @@ local function searchMoneyInGui()
 end
 local function detectMoney() return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui() end
 
+
 -- ===== 4) รายชื่อผู้เล่น (Roster) =====
 local function buildRoster()
     local list = {}
@@ -387,7 +293,7 @@ local function buildRoster()
     return list
 end
 
--- ===== 5) Egg Inventory =====
+-- ===== 5) Inventories & Gift =====
 local function eggFolder()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
@@ -405,8 +311,6 @@ local function readEggs()
     end
     return list
 end
-
--- ===== 5.x) Foods Inventory =====
 local FOOD_LIST = {
   "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
   "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
@@ -439,36 +343,24 @@ local function getFoodCount(name)
     local canonical = canonicalFoodName(name)
     return tonumber(asset:GetAttribute(tostring(canonical))) or 0
 end
-
--- ===== NEW: Gift daily counter (UserFlag) =====
 local function readGiftDaily()
-    -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local data = pg:FindFirstChild("Data");                         if not data then return nil end
     local uf   = data:FindFirstChild("UserFlag");                   if not uf then return nil end
     local usedAttr = uf:GetAttribute("TodaySendGiftCount")
-    local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD
+    local dateAttr = uf:GetAttribute("TodaySendGiftTimer")
     local used = tonumber(usedAttr) or 0
     local date = (dateAttr ~= nil) and tostring(dateAttr) or ""
     return { used = used, limit = 500, date = date }
 end
--- ===== /NEW =====
-
--- ===== 5.5) Gift remotes =====
 local GiftRE = (function()
-    local ok, remote = pcall(function()
-        return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("GiftRE")
-    end)
+    local ok, remote = pcall(function() return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("GiftRE") end)
     return ok and remote or nil
 end)()
 local CharacterRE = (function()
-    local ok, remote = pcall(function()
-        return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE")
-    end)
+    local ok, remote = pcall(function() return ReplicatedStorage:WaitForChild("Remote",5):FindFirstChild("CharacterRE") end)
     return ok and remote or nil
 end)()
-
--- ===== Movement / focus helpers =====
 local function getHRP(plr)
     plr = plr or LocalPlayer
     local ch = plr and plr.Character
@@ -480,9 +372,7 @@ local function teleportNear(targetPlr, offset)
     if not (myHRP and tgHRP) then return false, "missing HRP" end
     local dir = (myHRP.Position - tgHRP.Position)
     if dir.Magnitude < 0.1 then dir = Vector3.new(1,0,0) end
-    pcall(function()
-        myHRP.CFrame = CFrame.new(tgHRP.Position + dir.Unit * offset, tgHRP.Position)
-    end)
+    pcall(function() myHRP.CFrame = CFrame.new(tgHRP.Position + dir.Unit * offset, tgHRP.Position) end)
     task.wait(0.08)
     return true
 end
@@ -490,8 +380,6 @@ local function tap(key)
     VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.04)
     VirtualInputManager:SendKeyEvent(false, key, false, game)
 end
-
--- Eggs: focus/hold
 local function holdEgg(uid)
     if not uid then return end
     if CharacterRE then
@@ -506,8 +394,6 @@ local function holdEgg(uid)
     tap(Enum.KeyCode.One); task.wait(0.30)
     tap(Enum.KeyCode.Two); task.wait(0.30)
 end
-
--- Foods: focus/hold by name
 local function focusFood(name)
     if not name or name=="" then return false end
     local canonical = canonicalFoodName(name)
@@ -524,8 +410,6 @@ local function focusFood(name)
     tap(Enum.KeyCode.Two); task.wait(0.25)
     return true
 end
-
--- ===== Egg list / filter =====
 local function normalizeMut(m) if not m then return nil end m = tostring(m); if m=="Jurassic" then return "Dino" end return m end
 local function listEggsFiltered(typeSet, mutSet, limit)
     local eg = eggFolder()
@@ -545,8 +429,6 @@ local function listEggsFiltered(typeSet, mutSet, limit)
     end
     return out
 end
-
--- ===== Gift (Egg) — with confirm =====
 local function confirmEggRemoved(uid, timeout)
     return waitFor(function()
         local eg = eggFolder(); if not eg then return false end
@@ -570,8 +452,6 @@ local function giftOnceEgg(targetPlr, eggUID)
     end
     return false, "no confirm"
 end
-
--- ===== Gift (Food) — with confirm =====
 local function giftOnceFood(targetPlr, foodName)
     if not targetPlr or not targetPlr.Parent then return false, "no target" end
     if not foodName or foodName=="" then return false, "no food name" end
@@ -584,9 +464,7 @@ local function giftOnceFood(targetPlr, foodName)
     for attempt = 1, 3 do
         local fired = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if fired then
-            local ok = waitFor(function()
-                return getFoodCount(foodName) <= (before - 1)
-            end, 2.0 + 0.4 * attempt, 0.07)
+            local ok = waitFor(function() return getFoodCount(foodName) <= (before - 1) end, 2.0 + 0.4 * attempt, 0.07)
             if ok then return true end
         end
         focusFood(foodName)
@@ -594,8 +472,6 @@ local function giftOnceFood(targetPlr, foodName)
     end
     return false, "no confirm"
 end
-
--- ===== Gift Batch (Eggs) =====
 local giftCancelFlag = false
 local function giftProgress(sendFn, sent, total, label)
     sendFn("GiftProgress", { sent = sent, total = total, label = label })
@@ -607,21 +483,17 @@ local function resolveTarget(str)
     end
     return nil
 end
-
 local function giftBatchFiltered(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload.Target)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
-
     local typeSet = payload.T and {[tostring(payload.T)]=true} or {}
     local mutSet  = payload.M and {[tostring(normalizeMut(payload.M))]=true} or {}
     if mutSet["Dino"] then mutSet["Jurassic"]=true end
-
     local pool = listEggsFiltered(typeSet, mutSet, nil)
     local want = tonumber(payload.Amount or 0) or 0
     if want<=0 then want = #pool end
     want = math.min(want, #pool)
-
     local sent=0; giftCancelFlag=false
     giftProgress(sendFn, 0, want, "start")
     while sent < want and not giftCancelFlag do
@@ -634,7 +506,6 @@ local function giftBatchFiltered(sendFn, payload)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
-
 local function giftBatchUIDs(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
     local target = resolveTarget(payload.Target)
@@ -652,21 +523,16 @@ local function giftBatchUIDs(sendFn, payload)
     end
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
 end
-
--- ===== Gift Batch (Foods) =====
 local function giftBatchFood(sendFn, payload)
     local target = resolveTarget(payload and payload.Target)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
     local foodName = tostring(payload and payload.Food or "")
     if foodName=="" then sendFn("GiftDone",{ok=false,reason="no food",sent=0,total=0}); return end
-
     local have = getFoodCount(foodName)
     if have<=0 then sendFn("GiftDone",{ok=false,reason="no stock",sent=0,total=0}); return end
-
     local want = tonumber(payload.Amount or 0) or 0
     if want<=0 then want = have end
     want = math.min(want, have)
-
     local sent=0; giftCancelFlag=false
     giftProgress(sendFn, 0, want, foodName)
     while sent < want and not giftCancelFlag do
@@ -678,6 +544,7 @@ local function giftBatchFood(sendFn, payload)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
+
 
 -- ===== 6) ชื่อห้อง =====
 local function makeRoomName()
@@ -702,6 +569,35 @@ function Nexus:_wsUrl()
         HttpService:UrlEncode(makeRoomName())
     )
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
+end
+
+-- ===== helper: เปิด/ปิดป้าย แล้วอ่านค่า Pet Farm Value =====
+local function pulsePlayerInfoAndRead(delayShow, delayHide)
+    delayShow = tonumber(delayShow) or 0.25
+    delayHide = tonumber(delayHide) or 0.15
+
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil, "no PlayerGui" end
+    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil, "no ScreenPlayerInfo" end
+    local frame = gui:FindFirstChild("Frame"); if not frame then return nil, "no Frame" end
+
+    -- จำสถานะเดิม
+    local wasVisible = frame.Visible
+
+    -- เปิด
+    pcall(function() frame.Visible = true end)
+    task.wait(delayShow)
+
+    -- ลองอ่านค่าทันที (เผื่อเกมอัปเดตทันทีที่เปิด)
+    local val = readPetFarmValue()
+
+    -- ปิดกลับ
+    pcall(function() frame.Visible = false end)
+    task.wait(delayHide)
+
+    -- คืนค่าป้าย (กันกวนผู้เล่น ถ้าเดิมมันเปิด)
+    pcall(function() frame.Visible = wasVisible end)
+
+    return val
 end
 
 -- ===== 8) onMessage (Exec/Echo/Gift) =====
@@ -739,15 +635,22 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    -- [[ C) เพิ่ม HANDLER สำหรับ PetValueRefresh ]] --
-    -- === (ใหม่) สั่ง refresh ค่า Pet Farm Value แบบ on-demand ===
+    -- === GET VALUE (Pet Farm Value): เปิด-ปิดป้ายเพื่อบังคับรีเฟรชแล้วส่งค่ากลับ ===
     if name == "PetValueRefresh" then
         task.spawn(function()
-            local v = readPetFarmValue()
+            local v, err = pulsePlayerInfoAndRead(0.30, 0.10)
             if v then
-                self:Send("SetPetFarmValue", { value = v, source = "manual" })
+                self:Send("SetPetFarmValue", { value = v })
+                self:Send("Log", { Content = "[GetValue] ok: "..tostring(v) })
             else
-                self:Send("Log", { Content = "[PetValue] refresh failed (nil)" })
+                -- ถ้าอ่านไม่ได้ ลองอ่านแบบเดิมอีกครั้ง (เผื่อ GUI อัปเดตช้า)
+                local fallback = readPetFarmValue()
+                if fallback then
+                    self:Send("SetPetFarmValue", { value = fallback })
+                    self:Send("Log", { Content = "[GetValue] ok(fallback): "..tostring(fallback) })
+                else
+                    self:Send("Log", { Content = "[GetValue] failed: "..tostring(err) })
+                end
             end
         end)
         return
@@ -800,7 +703,7 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local lastGiftJson -- NEW: diff GiftDaily
+            local lastGiftJson
             local lastPetFarmVal
             local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
@@ -816,10 +719,7 @@ function Nexus:Connect(host)
                 tInv += 1
                 if tInv >= 5 then
                     tInv = 0
-                    self:Send("SetInventory", {
-                        Eggs  = readEggs(),
-                        Foods = readFoods(),
-                    })
+                    self:Send("SetInventory", { Eggs = readEggs(), Foods = readFoods() })
                 end
 
                 tChar += 1
@@ -840,7 +740,6 @@ function Nexus:Connect(host)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
                 end
 
-                -- NEW: ส่งยอด Gift/Day แบบไม่ยุ่งกับระบบ Gift เดิม
                 tGift += 1
                 if tGift >= 2 then
                     tGift = 0
@@ -854,9 +753,8 @@ function Nexus:Connect(host)
                     end
                 end
 
-                -- === Pet Farm Value (จาก ScreenPlayerInfo.info1.Title2) ===
                 tPet += 1
-                if tPet >= 2 then -- ทุก ~2 วินาที
+                if tPet >= 2 then
                     tPet = 0
                     local pv = readPetFarmValue()
                     if pv and pv ~= lastPetFarmVal then
