@@ -26,11 +26,11 @@ if not WSConnect then
 end
 
 -- ===== 2) Services =====
-local HttpService         = game:GetService("HttpService")
-local Players             = game:GetService("Players")
-local Workspace           = game:GetService("Workspace")
-local MarketplaceService  = game:GetService("MarketplaceService")
-local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local HttpService         = game:GetService("HttpService")
+local Players             = game:GetService("Players")
+local Workspace           = game:GetService("Workspace")
+local MarketplaceService  = game:GetService("MarketplaceService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
@@ -66,6 +66,20 @@ local function parseNumberLikeText(s)
     return n
 end
 
+-- ===== read "Pet Farm Value" from GUI =====
+local function readPetFarmValue()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local gui = pg:FindFirstChild("ScreenPlayerInfo"); if not gui then return nil end
+    local frame = gui:FindFirstChild("Frame"); if not frame then return nil end
+    local content = frame:FindFirstChild("Content"); if not content then return nil end
+    local info1 = content:FindFirstChild("info1"); if not info1 then return nil end
+    local title2 = info1:FindFirstChild("Title2")
+    if title2 and (title2:IsA("TextLabel") or title2:IsA("TextButton")) then
+        return parseNumberLikeText(title2.Text)
+    end
+    return nil
+end
+
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
     local char = LocalPlayer.Character
@@ -75,9 +89,9 @@ local function getCharacterSnapshot()
     local pos = hrp and hrp.Position
     return {
         characterName = char.Name,
-        health      = hum and hum.Health or nil,
+        health      = hum and hum.Health or nil,
         maxHealth = hum and hum.MaxHealth or nil,
-        position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
+        position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
     }
 end
 
@@ -184,9 +198,9 @@ local function tileOccupied(part)
     params.RespectCanCollide = false
 
     local include = {}
-    local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
+    local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
     local pets = Workspace:FindFirstChild("Pets")
-    if pbb  then table.insert(include, pbb)  end
+    if pbb  then table.insert(include, pbb)  end
     if pets then table.insert(include, pets) end
     if #include == 0 then include = { Workspace } end
     params.FilterDescendantsInstances = include
@@ -203,7 +217,7 @@ local function tileOccupied(part)
             or m:FindFirstChildWhichIsA("AnimationController", true)
             or m:GetAttribute("IsPet") or m:GetAttribute("PetType") or m:GetAttribute("T")
             or (pets and m:IsDescendantOf(pets))
-            or (pbb  and m:IsDescendantOf(pbb))
+            or (pbb  and m:IsDescendantOf(pbb))
             then
                 return true
             end
@@ -218,7 +232,7 @@ local function readFarmStatus()
         for _,t in ipairs(tiles) do if tileOccupied(t) then filled += 1 end end
         return filled, #tiles
     end
-    local landFilled,  landTotal  = count(true)
+    local landFilled,  landTotal  = count(true)
     local waterFilled, waterTotal = count(false)
     return { Land={filled=landFilled,total=landTotal}, Water={filled=waterFilled,total=waterTotal} }
 end
@@ -308,8 +322,8 @@ local function canonicalFoodName(input)
     local k = string.lower(tostring(input)); return FOOD_SET[k] or input
 end
 local function foodsAssetFolder()
-    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                         if not data then return nil end
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                         if not data then return nil end
     return data:FindFirstChild("Asset")
 end
 local function readFoods()
@@ -333,9 +347,9 @@ end
 -- ===== NEW: Gift daily counter (UserFlag) =====
 local function readGiftDaily()
     -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
-    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                         if not data then return nil end
-    local uf   = data:FindFirstChild("UserFlag");                   if not uf then return nil end
+    local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
+    local data = pg:FindFirstChild("Data");                         if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");                   if not uf then return nil end
     local usedAttr = uf:GetAttribute("TodaySendGiftCount")
     local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD
     local used = tonumber(usedAttr) or 0
@@ -426,7 +440,7 @@ local function listEggsFiltered(typeSet, mutSet, limit)
             local T = ch:GetAttribute("T") or ch:GetAttribute("Type") or ch.Name
             local M = normalizeMut(ch:GetAttribute("M") or ch:GetAttribute("Mutate"))
             local okType = (not typeSet) or (next(typeSet)==nil) or typeSet[tostring(T)]
-            local okMut  = (not mutSet)  or (next(mutSet) ==nil) or mutSet[tostring(M or "")]
+            local okMut  = (not mutSet)  or (next(mutSet) ==nil) or mutSet[tostring(M or "")]
             if okType and okMut then
                 out[#out+1] = { uid = ch.Name, T = tostring(T), M = M }
                 if limit and #out >= limit then break end
@@ -504,7 +518,7 @@ local function giftBatchFiltered(sendFn, payload)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
 
     local typeSet = payload.T and {[tostring(payload.T)]=true} or {}
-    local mutSet  = payload.M and {[tostring(normalizeMut(payload.M))]=true} or {}
+    local mutSet  = payload.M and {[tostring(normalizeMut(payload.M))]=true} or {}
     if mutSet["Dino"] then mutSet["Jurassic"]=true end
 
     local pool = listEggsFiltered(typeSet, mutSet, nil)
@@ -621,7 +635,7 @@ local function onSocketMessage(self, raw)
             local original_print, original_warn = print, warn
             local function toLine(...) local a={...}; for i=1,#a do a[i]=tostring(a[i]) end; return table.concat(a," ") end
             env.print = function(...) pcall(original_print, ...); self:Send("Log", { Content = toLine(...) }) end
-            env.warn  = function(...) pcall(original_warn , ...); self:Send("Log", { Content = "[WARN] " .. toLine(...) }) end
+            env.warn  = function(...) pcall(original_warn , ...); self:Send("Log", { Content = "[WARN] " .. toLine(...) }) end
             if setfenv then pcall(setfenv, fn, env) end
         end)
         local okRun, errRun = pcall(fn)
@@ -668,12 +682,12 @@ function Nexus:Connect(host)
             self.Socket = sock; self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
 
-            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
+            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
             if sock.OnMessage then sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end) end
 
             -- ส่งค่าพื้นฐาน
             self:Send("SetPlaceId", { Content = tostring(game.PlaceId) })
-            self:Send("SetJobId",   { Content = tostring(game.JobId)   })
+            self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
             local lastGiftJson -- NEW: diff GiftDaily
@@ -693,7 +707,7 @@ function Nexus:Connect(host)
                 if tInv >= 5 then
                     tInv = 0
                     self:Send("SetInventory", {
-                        Eggs  = readEggs(),
+                        Eggs  = readEggs(),
                         Foods = readFoods(),
                     })
                 end
@@ -730,6 +744,16 @@ function Nexus:Connect(host)
                     end
                 end
 
+                -- === Pet Farm Value (จาก ScreenPlayerInfo.info1.Title2) ===
+                tPet += 1
+                if tPet >= 2 then -- ทุก ~2 วินาที
+                    tPet = 0
+                    local pv = readPetFarmValue()
+                    if pv and pv ~= lastPetFarmVal then
+                        lastPetFarmVal = pv
+                        self:Send("SetPetFarmValue", { value = pv })
+                    end
+                end
 
                 task.wait(1)
             end
