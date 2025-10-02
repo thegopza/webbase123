@@ -25,12 +25,12 @@ if not WSConnect then
 end
 
 -- ===== 2) Services =====
-local HttpService         = game:GetService("HttpService")
-local Players             = game:GetService("Players")
-local Workspace           = game:GetService("Workspace")
-local MarketplaceService  = game:GetService("MarketplaceService")
-local ReplicatedStorage   = game:GetService("ReplicatedStorage")
-local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService        = game:GetService("HttpService")
+local Players            = game:GetService("Players")
+local Workspace          = game:GetService("Workspace")
+local MarketplaceService   = game:GetService("MarketplaceService")
+local ReplicatedStorage    = game:GetService("ReplicatedStorage")
+local VirtualInputManager  = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
@@ -302,9 +302,9 @@ end
 
 -- ===== 5.x) Foods Inventory =====
 local FOOD_LIST = {
-  "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
-  "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
-  "Orange","Pear","Pineapple","Strawberry","VoltGinkgo","Watermelon"
+ "Apple","Banana","BloodstoneCycad","Blueberry","ColossalPinecone","Corn",
+ "DeepseaPearlFruit","DragonFruit","Durian","GoldMango","Grape",
+ "Orange","Pear","Pineapple","Strawberry","VoltGinkgo","Watermelon"
 }
 local FOOD_SET = {}; for _,n in ipairs(FOOD_LIST) do FOOD_SET[string.lower(n)] = n end
 local function canonicalFoodName(input)
@@ -452,7 +452,7 @@ local function giftOnceEgg(targetPlr, eggUID)
     if not eggUID then return false, "no egg uid" end
     teleportNear(targetPlr, 1.6)
     holdEgg(eggUID)
-    task.wait(0.60)
+    task.wait(0.75)
     for attempt = 1, 3 do
         local fired = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if fired then
@@ -474,7 +474,7 @@ local function giftOnceFood(targetPlr, foodName)
     teleportNear(targetPlr, 1.6)
     local focused = focusFood(foodName)
     if not focused then return false, "focus failed" end
-    task.wait(0.10)
+    task.wait(0.20)
     for attempt = 1, 3 do
         local fired = GiftRE and pcall(function() GiftRE:FireServer(targetPlr) end) or false
         if fired then
@@ -502,9 +502,31 @@ local function resolveTarget(str)
     return nil
 end
 
+-- ===== Helper: ตรวจว่าผู้รับยังอยู่ห้องไหม ไม่อยู่ให้ยุติและแจ้งเว็บ =====
+local function ensureTargetOnlineOrAbort(sendFn, targetKey, label, sent, total)
+    local tgt = resolveTarget(targetKey)
+    if tgt and tgt.Parent == Players then
+        return true -- ยังออนไลน์ในห้อง
+    end
+    -- ผู้รับไม่อยู่แล้ว → แจ้งเว็บ & ยุติ
+    sendFn("GiftAbort", {
+        reason = string.format("%s → %s ได้ทำการหยุดส่งเนื่องจาก Player หลุด หรือ Disconnect", label or "-", tostring(targetKey)),
+        sent   = tonumber(sent or 0) or 0,
+        total  = tonumber(total or 0) or 0,
+        ts     = nowsec(),
+        ok     = false,
+        label  = label or "abort"
+    })
+    -- ปิดด้วย GiftDone(ok=false) ให้ระบบสรุปรอบนี้
+    sendFn("GiftDone", { ok = false, sent = tonumber(sent or 0) or 0, total = tonumber(total or 0) or 0 })
+    return false
+end
+
+-- ===== Gift Batch (Eggs) — Filtered =====
 local function giftBatchFiltered(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
-    local target = resolveTarget(payload.Target)
+    local targetKey = payload and payload.Target
+    local target = resolveTarget(targetKey)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
 
     local typeSet = payload.T and {[tostring(payload.T)]=true} or {}
@@ -516,32 +538,64 @@ local function giftBatchFiltered(sendFn, payload)
     if want<=0 then want = #pool end
     want = math.min(want, #pool)
 
+    local labelForMsg = (payload.T or "-") .. ((payload.M and payload.M~="") and (" • "..tostring(payload.M)) or "")
+
     local sent=0; giftCancelFlag=false
+    local failCountGlobal, FAIL_LIMIT_GLOBAL = 0, math.max(5, math.ceil(want/2))
     giftProgress(sendFn, 0, want, "start")
+
+    -- ตรวจครั้งแรกก่อนเริ่ม
+    if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
+
     while sent < want and not giftCancelFlag do
+        -- ตรวจผู้รับยังออนไลน์ไหมในทุก iteration
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
+
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
+
         local ok = giftOnceEgg(target, egg.uid)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
+        if ok then
+            sent += 1
+            giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
+        else
+            failCountGlobal  += 1
+            if failCountGlobal >= FAIL_LIMIT_GLOBAL then
+                sendFn("GiftDone",{ok=false,sent=sent,total=want})
+                return
+            end
+        end
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
 
+-- ===== Gift Batch (Eggs by UIDs) =====
 local function giftBatchUIDs(sendFn, payload)
     if not GiftRE then sendFn("GiftDone",{ok=false,reason="GiftRE not found",sent=0,total=0}); return end
-    local target = resolveTarget(payload.Target)
+    local targetKey = payload and payload.Target
+    local target = resolveTarget(targetKey)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+
     local uids = payload.UIDs
     if type(uids)~="table" or #uids==0 then sendFn("GiftDone",{ok=false,reason="no UIDs",sent=0,total=0}); return end
     local total=#uids; local sent=0; giftCancelFlag=false
+    local labelForMsg = "Eggs (UID list)"
+
     giftProgress(sendFn, 0, total, "start")
+
+    if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then return end
+
     for _,uid in ipairs(uids) do
         if giftCancelFlag then break end
+
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then return end
+
         local ok = giftOnceEgg(target, uid)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, total, tostring(uid))
+        if ok then
+            sent += 1
+            giftProgress(sendFn, sent, total, tostring(uid))
+        end
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
@@ -549,8 +603,10 @@ end
 
 -- ===== Gift Batch (Foods) =====
 local function giftBatchFood(sendFn, payload)
-    local target = resolveTarget(payload and payload.Target)
+    local targetKey = payload and payload.Target
+    local target = resolveTarget(targetKey)
     if not target then sendFn("GiftDone",{ok=false,reason="target not found",sent=0,total=0}); return end
+
     local foodName = tostring(payload and payload.Food or "")
     if foodName=="" then sendFn("GiftDone",{ok=false,reason="no food",sent=0,total=0}); return end
 
@@ -561,13 +617,22 @@ local function giftBatchFood(sendFn, payload)
     if want<=0 then want = have end
     want = math.min(want, have)
 
+    local labelForMsg = tostring(foodName)
+
     local sent=0; giftCancelFlag=false
     giftProgress(sendFn, 0, want, foodName)
+
+    if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
+
     while sent < want and not giftCancelFlag do
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
+
         if getFoodCount(foodName) <= 0 then break end
         local ok = giftOnceFood(target, foodName)
-        sent += ok and 1 or 0
-        giftProgress(sendFn, sent, want, foodName)
+        if ok then
+            sent += 1
+            giftProgress(sendFn, sent, want, foodName)
+        end
         task.wait(0.08)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
@@ -756,6 +821,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
-
-
-
