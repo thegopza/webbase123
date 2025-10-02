@@ -9,8 +9,8 @@ Nexus (lite) — WS <-> Backend (port 3005)
 - Gift (Eggs: GiftStart / GiftUIDs พร้อม confirm ว่าลดจริง, Foods: GiftFoodStart พร้อม confirm ว่าลด count)
 - GiftStop ยกเลิกกลางคัน
 - auto reconnect
-- NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
-- UPDATED: Farm Income/sec (เฉพาะ "สัตว์ที่วางอยู่บนแปลงของเรา" เท่านั้น) → ส่งขึ้นเว็บเป็น key="Value"
+- SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
+- Farm Income/sec (รวมรายได้/วินาทีของสัตว์ทั้งหมด) → "ดึงเมื่อเว็บกดปุ่ม" เท่านั้น (on-demand)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -36,9 +36,13 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
 
--- ===== toggle debug =====
+-- ===== toggle debug / โหมด on-demand =====
 local DEBUG = false
 local function dprint(...) if DEBUG then print("[Nexus]", ...) end end
+
+-- ดึง Value เมื่อถูกสั่งจากเว็บเท่านั้น
+local ON_DEMAND_VALUE       = true   -- true = ปิดส่งอัตโนมัติ, คำนวณเมื่อเว็บสั่ง
+local VALUE_RATE_LIMIT_SEC  = 0.8    -- กันสแปมปุ่มจากเว็บ
 
 -- ===== Small utils =====
 local function round1(n) return n and math.floor(n*10+0.5)/10 or nil end
@@ -59,16 +63,17 @@ end
 local function parseNumberLikeText(s)
     if s == nil then return nil end
     if typeof(s) == "number" then return s end
-    s = tostring(s):gsub("[^%d%.-]", "")
-    return tonumber(s)
+    s = tostring(s)
+    s = s:gsub("[^%d%.-]", "")
+    local n = tonumber(s)
+    return n
 end
 
--- ===================== Pet data locators =====================
+-- ===== (คงไว้) OwnedPetData locator (ใช้กับ income fast) =====
 local function findOwnedPetData()
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
     local data = pg and pg:FindFirstChild("Data")
     local cand = {
-        data and data:FindFirstChild("Pets"),
         data and data:FindFirstChild("OwnedPetData"),
         pg   and pg :FindFirstChild("OwnedPetData"),
         ReplicatedStorage:FindFirstChild("OwnedPetData"),
@@ -79,6 +84,9 @@ local function findOwnedPetData()
     return nil
 end
 
+-- ===================== Produce/sec (ทุกตัว) =====================
+
+-- หาโฟลเดอร์สัตว์ที่ถูกวางอยู่ในโลก
 local function findPetFolder()
     local cand = {
         Workspace:FindFirstChild("Pets"),
@@ -89,58 +97,36 @@ local function findPetFolder()
     return Workspace
 end
 
--- ดึงค่ารายได้/วินาทีจาก "โมเดล" ที่วางแล้ว
+-- ดึงค่ารายได้/วินาทีจากโมเดลสัตว์ที่ "วางแล้ว"
 local function readProduceFromModel(model)
     if not model then return nil end
-    local KEYS = {
+    local keys = {
         "ProduceSpeed","ProducePerSecond","ProduceSec",
         "CoinsPerSecond","CoinPerSecond","CoinsPerSec","IncomePerSec",
         "ProductionPerSecond","YieldPerSecond",
     }
-    for _,k in ipairs(KEYS) do
+    for _,k in ipairs(keys) do
         local v = (model.GetAttribute and model:GetAttribute(k)) or nil
-        if typeof(v)=="number" and v>0 then return v end
+        if typeof(v)=="number" then return v end
     end
-    local pp = model.PrimaryPart or model:FindFirstChild("RootPart")
+    local pp = model.PrimaryPart
     if pp then
-        for _,k in ipairs(KEYS) do
+        for _,k in ipairs(keys) do
             local v = (pp.GetAttribute and pp:GetAttribute(k)) or nil
-            if typeof(v)=="number" and v>0 then return v end
+            if typeof(v)=="number" then return v end
         end
     end
-    return 0
+    return nil
 end
 
--- (fallback) อ่าน income/sec จากโหนดข้อมูลสัตว์
-local function GetIncomeFast(uid)
-    uid = tostring(uid or "")
-    local opd = findOwnedPetData()
-    if opd then
-        local node = opd:FindFirstChild(uid)
-        if node then
-            local keys = {
-                "ProduceSpeed","ProducePerSecond","ProduceSec",
-                "CoinsPerSecond","CoinPerSecond","CoinsPerSec","IncomePerSec",
-                "ProductionPerSecond","YieldPerSecond",
-                "Value","V","Power","Score","Price"
-            }
-            for _,k in ipairs(keys) do
-                local v = node:GetAttribute(k)
-                if typeof(v)=="number" and v>0 then return v end
-            end
-        end
-    end
-    return 0
-end
-
--- ===================== Island / Farm tiles =====================
+-- ===== Island resolver (ยึด OccupyingPlayerId) =====
 local function listIslands()
     local art = Workspace:FindFirstChild("Art")
     if not art then return {} end
     local out = {}
     for _,m in ipairs(art:GetChildren()) do
         if m:IsA("Model") and m.Name:match("^Island[_%-]?%d+$") then
-            out[#out+1] = m
+            table.insert(out, m)
         end
     end
     table.sort(out, function(a,b)
@@ -207,13 +193,14 @@ local function findIslandModel()
     return near
 end
 
--- collect farm tiles (กันนับซ้ำ + ฟิลเตอร์ 8x8x8)
+-- ===== collect farm tiles (กันนับซ้ำ + ฟิลเตอร์ 8x8x8) =====
 local TILE_SIZE = Vector3.new(8,8,8)
 local function collectFarmParts(isLand)
     local island = findIslandModel()
     if not island then return {} end
     local pat = isLand and "^Farm_split_%d+_%d+_%d+$" or "^WaterFarm_split_%d+_%d+_%d+$"
     local out, seen = {}, {}
+
     local function consider(inst)
         if inst:IsA("BasePart") and inst.Name:match(pat) and inst.Size == TILE_SIZE then
             if not seen[inst] then seen[inst]=true; out[#out+1]=inst end
@@ -224,7 +211,7 @@ local function collectFarmParts(isLand)
     return out
 end
 
--- ระบุโซนที่สัตว์วางอยู่ (Land/Water/Any) สำหรับ uid ที่วางแล้ว
+-- หา "พื้นที่" ที่สัตว์วางอยู่ (Land/Water) โดยเทียบกับฟาร์มไทล์ที่ใกล้สุด
 local function petArea(uid)
     local petsFolder = findPetFolder()
     local m = petsFolder and petsFolder:FindFirstChild(tostring(uid))
@@ -249,41 +236,78 @@ local function petArea(uid)
     return (dw < dl) and "Water" or "Land"
 end
 
--- ===================== Produce/sec (เฉพาะวางแล้ว) =====================
-
--- ผลรวม Produce/sec ของ "สัตว์ที่วางอยู่บนแปลงของเรา"
-local function sumProduceSecPlaced()
-    local petsRoot = findOwnedPetData()
-    local world    = findPetFolder()
-    if not petsRoot or not world then return 0 end
-
-    local myId = Players.LocalPlayer.UserId
-    local total = 0
-
-    for _, node in ipairs(petsRoot:GetChildren()) do
-        local uid = node.Name
-        local model = world:FindFirstChild(uid)
-        if model then
-            local ownerId = model:GetAttribute("UserId") or model:GetAttribute("OwnerId")
-            if typeof(ownerId)=="number" and ownerId == myId then
-                local ps = tonumber(readProduceFromModel(model)) or 0
-                if ps <= 0 then
-                    -- fallback เบา ๆ: ลองอ่านจาก node ข้อมูล
-                    ps = tonumber(GetIncomeFast(uid)) or 0
-                end
-                total += (ps > 0 and ps or 0)
+-- อ่านรายได้แบบเร็วสำหรับ "ยังไม่วาง" (พยายามอ่านจากข้อมูล)
+local function GetIncomeFast(uid)
+    uid = tostring(uid or "")
+    local opd = findOwnedPetData()
+    if opd then
+        local node = opd:FindFirstChild(uid)
+        if node then
+            local keys = {
+                "ProduceSpeed","ProducePerSecond","ProduceSec",
+                "CoinsPerSecond","CoinPerSecond","CoinsPerSec","IncomePerSec",
+                "ProductionPerSecond","YieldPerSecond",
+                "Value","V","Power","Score","Price"
+            }
+            for _,k in ipairs(keys) do
+                local v = node:GetAttribute(k)
+                if typeof(v)=="number" then return v end
             end
         end
     end
-    return total
+    return 0
 end
 
--- ส่ง “ยอดฟาร์มรวม (placed-only)” ขึ้นเว็บ ด้วยคีย์ Value
-local function pushFarmTotalAsValue(sendFn)
-    local total = tonumber(sumProduceSecPlaced()) or 0
-    sendFn("SetPetValue", { total = total, key = "Value" })
+-- รายการสัตว์ทั้งหมดของเรา + รายได้/วินาที
+local function listAllMyPetsWithIncome()
+    local out = {}
+    local opd = findOwnedPetData()
+    if not opd then return out end
+
+    local Pet_Folder = findPetFolder()
+
+    for _, node in ipairs(opd:GetChildren()) do
+        local uid = node.Name
+        local t   = node:GetAttribute("T") or "Unknown"
+        local m   = node:GetAttribute("M") or "None"
+
+        local placedModel = Pet_Folder and Pet_Folder:FindFirstChild(uid)
+        local isPlaced    = placedModel ~= nil
+
+        local income = 0
+        if isPlaced then
+            income = tonumber(readProduceFromModel(placedModel)) or 0
+            if income <= 0 then
+                income = tonumber(GetIncomeFast(uid)) or 0
+            end
+        else
+            income = tonumber(GetIncomeFast(uid)) or 0
+        end
+
+        local area = isPlaced and petArea(uid) or "Any"
+
+        table.insert(out, {
+            uid   = uid,
+            type  = t,
+            muta  = m,
+            placed = isPlaced,
+            area   = area,
+            income_per_sec = income,
+        })
+    end
+    return out
 end
--- =================== [/Produce/sec placed-only] ===================
+
+-- รวมรายได้ต่อวินาที “ทั้งหมด”
+local function totalIncomePerSec()
+    local s = 0
+    for _, p in ipairs(listAllMyPetsWithIncome()) do
+        s += (p.income_per_sec or 0)
+    end
+    return s
+end
+
+-- =================== [/Produce/sec] ===================
 
 
 -- ===== Helpers: Character snapshot =====
@@ -467,7 +491,7 @@ local function holdEgg(uid)
         if ok then task.wait(0.70); return end
     end
     local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
-    local data = pg and pg:FindFirstChild("Data")
+    local data = pg and pg:FindChild("Data")
     local deploy = data and data:FindFirstChild("Deploy")
     if deploy then deploy:SetAttribute("S2", "Egg_" .. uid) end
     tap(Enum.KeyCode.One); task.wait(0.30)
@@ -646,44 +670,23 @@ local function giftBatchFood(sendFn, payload)
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
 end
 
--- ===== Farm status (สรุป Land/Water: filled/total) =====
-local function readFarmStatus()
-    -- นับจำนวนช่อง Land/Water จาก tile จริง
-    local landTiles  = collectFarmParts(true)
-    local waterTiles = collectFarmParts(false)
-    local totals = { Land = {filled=0,total=#landTiles}, Water = {filled=0,total=#waterTiles} }
-
-    -- ประมาณ "filled" จากจำนวนสัตว์ที่วางแล้วในแต่ละโซน (capped ด้วยจำนวนช่อง)
-    local opd = findOwnedPetData()
-    local world = findPetFolder()
-    if not (opd and world) then return { Land = totals.Land, Water = totals.Water } end
-
-    local myId = LocalPlayer.UserId
-    local filled = { Land = 0, Water = 0 }
-    for _, node in ipairs(opd:GetChildren()) do
-        local uid = node.Name
-        local model = world:FindFirstChild(uid)
-        if model then
-            local ownerId = model:GetAttribute("UserId") or model:GetAttribute("OwnerId")
-            if typeof(ownerId)=="number" and ownerId == myId then
-                local area = petArea(uid)
-                if area == "Land" then filled.Land += 1
-                elseif area == "Water" then filled.Water += 1 end
-            end
-        end
-    end
-
-    totals.Land.filled  = math.min(filled.Land,  totals.Land.total)
-    totals.Water.filled = math.min(filled.Water, totals.Water.total)
-    return { Land = totals.Land, Water = totals.Water }
-end
-
 -- ===== 6) ชื่อห้อง =====
 local function makeRoomName()
     local placeName
     local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
     if ok and info and info.Name then placeName = info.Name end
     return (placeName or ("Place " .. tostring(game.PlaceId))) .. " • " .. string.sub(game.JobId, 1, 8)
+end
+
+-- ===== on-demand sender (กันสแปม) =====
+local _lastValueSentAt = 0
+local function _sendValueNow(self)
+    local now = tick()
+    if now - _lastValueSentAt < VALUE_RATE_LIMIT_SEC then return end
+    _lastValueSentAt = now
+
+    local total = tonumber(totalIncomePerSec()) or 0
+    self:Send("SetPetValue", { total = total, key = "Value" })
 end
 
 -- ===== 7) WS Manager =====
@@ -703,7 +706,7 @@ function Nexus:_wsUrl()
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
--- ===== 8) onMessage (Exec/Echo/Gift) =====
+-- ===== 8) onMessage (Exec/Echo/Gift/Value on-demand) =====
 local function onSocketMessage(self, raw)
     if type(raw) ~= "string" then local okc, s = pcall(tostring, raw); raw = okc and s or "" end
     if raw == "ping" then return end
@@ -738,9 +741,9 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    if name == "PetValueRefresh" then
-        -- ส่งยอดฟาร์มรวม (placed-only) เป็น Value
-        pushFarmTotalAsValue(function(n,p) self:Send(n,p) end)
+    -- ปุ่มบนเว็บ: ใช้ชื่อเดิม "PetValueRefresh" หรือ "GetValue" ก็ได้
+    if name == "PetValueRefresh" or name == "GetValue" then
+        _sendValueNow(self)
         return
     end
 
@@ -792,7 +795,7 @@ function Nexus:Connect(host)
 
             local lastMoney, lastFarmsJson, lastCharJson
             local lastGiftJson
-            local lastFarmValue = nil -- เก็บค่า income/sec ล่าสุด (ที่ส่งเป็น Value)
+            local lastFarmValue = nil -- (ไม่ใช้ในโหมด on-demand แต่เก็บไว้เผื่อเปิด auto)
 
             local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
@@ -827,6 +830,7 @@ function Nexus:Connect(host)
                 tFarm += 1
                 if tFarm >= 6 then
                     tFarm = 0
+                    -- NOTE: readFarmStatus() ต้องมีอยู่ในโปรเจคเดิม (คงไว้)
                     local farms = readFarmStatus()
                     local js = HttpService:JSONEncode(farms)
                     if js ~= lastFarmsJson then lastFarmsJson = js; self:Send("SetFarms", farms) end
@@ -846,14 +850,16 @@ function Nexus:Connect(host)
                     end
                 end
 
-                -- ส่ง "ยอดฟาร์มรวม (placed-only)" เป็น Value ทุก ๆ 5 วิ
-                tPet += 1
-                if tPet >= 5 then
-                    tPet = 0
-                    local total = tonumber(sumProduceSecPlaced()) or 0
-                    if total ~= lastFarmValue then
-                        lastFarmValue = total
-                        self:Send("SetPetValue", { total = total, key = "Value" })
+                -- โหมด on-demand: ไม่คำนวณ/ส่ง Value ที่นี่
+                if not ON_DEMAND_VALUE then
+                    tPet += 1
+                    if tPet >= 5 then
+                        tPet = 0
+                        local total = tonumber(totalIncomePerSec()) or 0
+                        if total ~= lastFarmValue then
+                            lastFarmValue = total
+                            self:Send("SetPetValue", { total = total, key = "Value" })
+                        end
                     end
                 end
 
