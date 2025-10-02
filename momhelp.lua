@@ -179,10 +179,10 @@ local function tileOccupied(part)
     local centerCF = part.CFrame
     local size = Vector3.new(8, 14, 8)
 
+    -- แทนที่บล็อคตั้งค่า params เดิมทั้งหมดใน tileOccupied() ด้วยอันนี้
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Include
-    params.RespectCanCollide = false
-
+    
     local include = {}
     local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
     local pets = Workspace:FindFirstChild("Pets")
@@ -190,6 +190,10 @@ local function tileOccupied(part)
     if pets then table.insert(include, pets) end
     if #include == 0 then include = { Workspace } end
     params.FilterDescendantsInstances = include
+    
+    -- (ทางเลือก) ลดภาระ scan
+    params.MaxParts = 2000 -- ปรับตามขนาดแมพ
+    -- params.CollisionGroup = "Default" -- ถ้าคุณใช้ระบบ CG
 
     local parts = Workspace:GetPartBoundsInBox(centerCF, size, params)
     if #parts == 0 then return false end
@@ -663,7 +667,10 @@ function Nexus:Connect(host)
     while true do
         local ok, sock = pcall(WSConnect, self:_wsUrl())
         if not ok or not sock then
-            warn("[NexusLite] เชื่อมต่อไม่สำเร็จ จะลองใหม่ใน 5 วิ..."); task.wait(5)
+            local waitMin, waitMax = 3, 8
+            local w = waitMin + math.random() * (waitMax - waitMin)
+            warn(("[NexusLite] เชื่อมต่อไม่สำเร็จ จะลองใหม่ใน %.1fs..."):format(w))
+            task.wait(w)
         else
             self.Socket = sock; self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
@@ -749,5 +756,6 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
+
 
 
