@@ -10,8 +10,8 @@ Nexus (full) — WS <-> Backend (port 3005)
 - GiftStop ยกเลิกกลางคัน
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
-- NEW: Pet Farm Value (อ่านค่าจาก GUI ScreenPlayerInfo)
-- NEW: Pet Value from OwnedPetData (probe + sum) with refresh support
+- NEW: Pet Value from OwnedPetData (probe + sum)
+- NEW: Pet Income/sec (produce/sec) with fallback to Value
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -149,6 +149,147 @@ local function sumAllPetValue(valueKey)
     end
     return s, key
 end
+
+-- ===================== [ADD] Produce/sec (ทุกตัว) =====================
+
+-- หาโฟลเดอร์สัตว์ที่ถูกวางอยู่ในโลก
+local function findPetFolder()
+    -- เกมส่วนใหญ่ใช้ชื่อ "Pets" หรือมีกลุ่มที่คล้ายกัน
+    local cand = {
+        Workspace:FindFirstChild("Pets"),
+        Workspace:FindFirstChild("Pet"),
+        Workspace:FindFirstChild("PetFolder"),
+    }
+    for _,v in ipairs(cand) do if v then return v end end
+    -- fallback: ใช้ Workspace แล้วกรองทีหลัง
+    return Workspace
+end
+
+-- ดึงค่ารายได้/วินาทีจากโมเดลสัตว์ที่ "วางแล้ว"
+local function readProduceFromModel(model)
+    if not model then return nil end
+    -- พยายามอ่านจาก Attribute ที่พบบ่อย
+    local keys = {
+        "ProduceSpeed","ProducePerSecond","ProduceSec",
+        "CoinsPerSecond","CoinPerSecond","CoinsPerSec","IncomePerSec",
+        "ProductionPerSecond","YieldPerSecond",
+    }
+    for _,k in ipairs(keys) do
+        local v = (model.GetAttribute and model:GetAttribute(k)) or nil
+        if typeof(v)=="number" then return v end
+    end
+    -- บางเกมเก็บไว้ที่ PrimaryPart
+    local pp = model.PrimaryPart
+    if pp then
+        for _,k in ipairs(keys) do
+            local v = (pp.GetAttribute and pp:GetAttribute(k)) or nil
+            if typeof(v)=="number" then return v end
+        end
+    end
+    return nil
+end
+
+-- หา "พื้นที่" ที่สัตว์วางอยู่ (Land/Water) โดยเทียบกับฟาร์มไทล์ที่ใกล้สุด
+local function petArea(uid)
+    local petsFolder = findPetFolder()
+    local m = petsFolder and petsFolder:FindFirstChild(tostring(uid))
+    if not (m and m:IsA("Model")) then return "Any" end
+    local cf = m:GetPivot()
+
+    local function nearestDistTo(list)
+        local best = math.huge
+        for _,t in ipairs(list) do
+            local d = (t:GetPivot().Position - cf.Position).Magnitude
+            if d < best then best = d end
+        end
+        return best
+    end
+
+    -- ใช้ตัวช่วยจากสคริปต์เดิม (collectFarmParts)
+    local lands  = collectFarmParts(true)
+    local waters = collectFarmParts(false)
+
+    local dl = nearestDistTo(lands)
+    local dw = nearestDistTo(waters)
+    if dl == math.huge and dw == math.huge then return "Any" end
+    return (dw < dl) and "Water" or "Land"
+end
+
+-- อ่านรายได้แบบเร็วสำหรับ "ยังไม่วาง" (พยายามอ่านจากข้อมูล/GUI)
+local function GetIncomeFast(uid)
+    uid = tostring(uid or "")
+    -- 1) OwnedPetData ของตัวนั้นมีค่าอยู่แล้วหรือไม่
+    local opd = findOwnedPetData()
+    if opd then
+        local node = opd:FindFirstChild(uid)
+        if node then
+            local keys = {
+                "ProduceSpeed","ProducePerSecond","ProduceSec",
+                "CoinsPerSecond","CoinPerSecond","CoinsPerSec","IncomePerSec",
+                "ProductionPerSecond","YieldPerSecond",
+                "Value","V","Power","Score","Price" -- เผื่อเกมใช้ชื่ออื่น
+            }
+            for _,k in ipairs(keys) do
+                local v = node:GetAttribute(k)
+                if typeof(v)=="number" then return v end
+            end
+        end
+    end
+    -- 2) (ตัวเลือก) ลองอ่านจาก GUI inventory ถ้ามีแสดง (ข้ามในเวอร์ชันทั่วไปเพื่อความเร็ว)
+    -- สามารถเติม logic ส่อง PlayerGui Inventory ได้หากเกมคุณมีตำแหน่งแน่นอน
+    return 0
+end
+
+-- รายการสัตว์ทั้งหมดของเรา + รายได้/วินาที
+local function listAllMyPetsWithIncome()
+    local out = {}
+    local opd = findOwnedPetData()
+    if not opd then return out end
+
+    local Pet_Folder = findPetFolder()
+
+    for _, node in ipairs(opd:GetChildren()) do
+        local uid = node.Name
+        local t   = node:GetAttribute("T") or "Unknown"
+        local m   = node:GetAttribute("M") or "None"
+
+        local placedModel = Pet_Folder and Pet_Folder:FindFirstChild(uid)
+        local isPlaced    = placedModel ~= nil
+
+        local income = 0
+        if isPlaced then
+            income = tonumber(readProduceFromModel(placedModel)) or 0
+            if income <= 0 then
+                -- เผื่อไม่มีแอตทริบิวต์บนโมเดล ให้ลองอ่านจาก OwnedPetData ก็ยังได้
+                income = tonumber(GetIncomeFast(uid)) or 0
+            end
+        else
+            income = tonumber(GetIncomeFast(uid)) or 0
+        end
+
+        local area = isPlaced and petArea(uid) or "Any"
+
+        table.insert(out, {
+            uid   = uid,
+            type  = t,
+            muta  = m,
+            placed = isPlaced,
+            area   = area,
+            income_per_sec = income,
+        })
+    end
+    return out
+end
+
+-- รวมรายได้ต่อวินาที “ทั้งหมด”
+local function totalIncomePerSec()
+    local s = 0
+    for _, p in ipairs(listAllMyPetsWithIncome()) do
+        s += (p.income_per_sec or 0)
+    end
+    return s
+end
+-- =================== [/ADD Produce/sec] ===================
 
 
 -- ===== Helpers: Character snapshot =====
@@ -715,15 +856,25 @@ local function onSocketMessage(self, raw)
     end
 
     if name == "PetValueRefresh" then
-        -- คำนวณแบบฉับพลัน แล้วส่งให้ทันที
-        local total, key = sumAllPetValue(self.petValueKey) -- Use self.petValueKey to access state
-        if total then
-            self.petValueKey = key or self.petValueKey
-            self.lastPetValue = total
-            self:Send("SetPetValue", { total = total, key = self.petValueKey })
-            self:Send("Log", { Content = ("[PetValue] total=%s key=%s"):format(tostring(total), tostring(self.petValueKey)) })
+        -- คำนวณผลรวมรายได้ต่อวินาที
+        local rate = totalIncomePerSec()
+        if rate and rate > 0 then
+            self.lastPetRate = rate
+            self.petRateKey  = "CoinsPerSec"
+            self:Send("SetPetValue", { total = rate, key = self.petRateKey })
+            self:Send("Log", { Content = ("[PetRate] total/sec=%s key=%s"):format(tostring(rate), tostring(self.petRateKey)) })
         else
-            self:Send("Log", { Content = "[PetValue] not found (OwnedPetData/key missing)" })
+            -- fallback เดิม (รวม Value หรืออ่าน GUI)
+            local total, key = sumAllPetValue(self.petValueKey)
+            if not total then total, key = readPetFarmValue(), "GUI" end
+            if total then
+                self.petValueKey = key or self.petValueKey
+                self.lastPetValue = total
+                self:Send("SetPetValue", { total = total, key = self.petValueKey })
+                self:Send("Log", { Content = ("[PetValue] total=%s key=%s (fallback)"):format(tostring(total), tostring(self.petValueKey)) })
+            else
+                self:Send("Log", { Content = "[PetRate] not found and fallback Value not found" })
+            end
         end
         return
     end
@@ -775,10 +926,12 @@ function Nexus:Connect(host)
             self:Send("SetJobId",   { Content = tostring(game.JobId)   })
 
             local lastMoney, lastFarmsJson, lastCharJson
-            local lastGiftJson -- NEW: diff GiftDaily
+            local lastGiftJson
             local lastPetFarmVal
-            local lastPetValue, petValueKey = nil, nil  -- NEW from instructions
-            self.lastPetValue, self.petValueKey = lastPetValue, petValueKey -- Make accessible in onSocketMessage
+            local lastPetValue, petValueKey = nil, nil
+            local lastPetRate, petRateKey = nil, nil
+            self.lastPetValue, self.petValueKey = lastPetValue, petValueKey
+            self.lastPetRate, self.petRateKey = lastPetRate, petRateKey
 
             local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
@@ -832,21 +985,28 @@ function Nexus:Connect(host)
                     end
                 end
 
-                -- NEW: Pet Value from OwnedPetData
                 tPet += 1
                 if tPet >= 5 then
                     tPet = 0
-                    local total, key = sumAllPetValue(petValueKey)
-                    if not total then total, key = readPetFarmValue(), "GUI" end -- Optional fallback
-                    if total then
-                        petValueKey = key or petValueKey
-                        if total ~= lastPetValue then
-                            lastPetValue = total
-                            self:Send("SetPetValue", { total = total, key = petValueKey })
+
+                    -- 1) rate (coins/sec) จากทุกตัว
+                    local rate = totalIncomePerSec()
+                    if rate and rate > 0 then
+                        if rate ~= self.lastPetRate then
+                            self.lastPetRate = rate
+                            self.petRateKey  = "CoinsPerSec"
+                            self:Send("SetPetValue", { total = rate, key = self.petRateKey })
+                        end
+                    else
+                        -- 2) fallback: รวม Value จาก OwnedPetData / GUI
+                        local total, key = sumAllPetValue(self.petValueKey)
+                        if not total then total, key = readPetFarmValue(), "GUI" end
+                        if total and total ~= self.lastPetValue then
+                            self.petValueKey  = key or self.petValueKey
+                            self.lastPetValue = total
+                            self:Send("SetPetValue", { total = total, key = self.petValueKey })
                         end
                     end
-                    -- Update shared state for onSocketMessage
-                    self.lastPetValue, self.petValueKey = lastPetValue, petValueKey
                 end
 
                 task.wait(1)
