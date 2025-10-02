@@ -41,7 +41,7 @@ local DEBUG = false
 local function dprint(...) if DEBUG then print("[Nexus]", ...) end end
 
 -- ดึง Value เมื่อถูกสั่งจากเว็บเท่านั้น
-local ON_DEMAND_VALUE       = true   -- true = ปิดส่งอัตโนมัติ, คำนวณเมื่อเว็บสั่ง
+local ON_DEMAND_VALUE       = false   -- true = ปิดส่งอัตโนมัติ, คำนวณเมื่อเว็บสั่ง
 local VALUE_RATE_LIMIT_SEC  = 0.8    -- กันสแปมปุ่มจากเว็บ
 
 -- ===== Small utils =====
@@ -882,3 +882,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
+
