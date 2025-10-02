@@ -10,7 +10,6 @@ Nexus (full) — WS <-> Backend (port 3005)
 - GiftStop ยกเลิกกลางคัน
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
-- NEW: Pet Farm Value (อ่านค่าจาก GUI ScreenPlayerInfo)
 ]]
 
 -- ===== 0) รอเกมโหลด =====
@@ -750,4 +749,5 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
+
 
