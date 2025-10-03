@@ -7,7 +7,7 @@ Nexus (full) — WS <-> Backend (port 3005)
 - farm status 6s (OccupyingPlayerId + ป้องกันนับซ้ำ/ฟิลเตอร์ขนาด)
 - Exec (loadstring/pcall) + Log
 - Gift (Eggs: GiftStart / GiftUIDs พร้อม confirm ว่าลดจริง, Foods: GiftFoodStart พร้อม confirm ว่าลด count)
-- GiftStop ยกเลิกกลางคัน
+- GiftStop ยกเลิกกลางคัน (match ตาม Target + T/M หรือ Food)
 - auto reconnect
 - NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
 ]]
@@ -155,7 +155,7 @@ local function findIslandModel()
     return near
 end
 
--- ===== collect farm tiles (กันนับซ้ำ + ฟิลเตอร์ 8x8x8) =====
+-- ===== collect farm parts (กันนับซ้ำ + ฟิลเตอร์ 8x8x8) =====
 local TILE_SIZE = Vector3.new(8,8,8)
 local function collectFarmParts(isLand)
     local island = findIslandModel()
@@ -179,10 +179,9 @@ local function tileOccupied(part)
     local centerCF = part.CFrame
     local size = Vector3.new(8, 14, 8)
 
-    -- แทนที่บล็อคตั้งค่า params เดิมทั้งหมดใน tileOccupied() ด้วยอันนี้
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Include
-    
+
     local include = {}
     local pbb  = Workspace:FindFirstChild("PlayerBuiltBlocks")
     local pets = Workspace:FindFirstChild("Pets")
@@ -486,11 +485,56 @@ local function giftOnceFood(targetPlr, foodName)
     return false, "no confirm"
 end
 
--- ===== Gift Batch (Eggs) =====
+-- ===== Gift session state (สำหรับ Stop แบบเลือกเป้าหมาย/ชนิด) =====
+local currentGift = nil   -- {mode="eggs"/"foods"/"uids", target, T, M, Food, total, sent}
 local giftCancelFlag = false
+
+local function beginGiftSession(mode, target, T, M, Food, total)
+    currentGift = {
+        mode = tostring(mode or ""),
+        target = target and tostring(target) or "",
+        T = T and tostring(T) or nil,
+        M = normalizeMut(M),
+        Food = Food and canonicalFoodName(Food) or nil,
+        total = tonumber(total) or 0,
+        sent = 0,
+        startedAt = nowsec()
+    }
+    giftCancelFlag = false
+end
+local function updateGiftSent(n)
+    if currentGift then currentGift.sent = tonumber(n) or currentGift.sent end
+end
+local function clearGiftSession()
+    currentGift = nil
+    giftCancelFlag = false
+end
+
+local function payloadMatchesCurrentStop(kind, payload)
+    if not currentGift or not payload then return false end
+    local tgt = tostring(payload.Target or "")
+    if tgt ~= currentGift.target then return false end
+
+    if kind == "eggs" then
+        local t = payload.T and tostring(payload.T) or nil
+        local m = payload.M and normalizeMut(payload.M) or nil
+        -- อนุญาตให้ M ว่าง = "-" เทียบกับ nil
+        local curM = currentGift.M or "-"
+        local reqM = m or "-"
+        return (t == currentGift.T) and (reqM == curM)
+    elseif kind == "foods" then
+        local f = payload.Food and canonicalFoodName(payload.Food) or nil
+        return f ~= nil and f == currentGift.Food
+    end
+    return false
+end
+
+-- ===== Gift progress reporting =====
 local function giftProgress(sendFn, sent, total, label)
+    updateGiftSent(sent)
     sendFn("GiftProgress", { sent = sent, total = total, label = label })
 end
+
 local function resolveTarget(str)
     if not str then return nil end
     for _,p in ipairs(Players:GetPlayers()) do
@@ -514,8 +558,8 @@ local function ensureTargetOnlineOrAbort(sendFn, targetKey, label, sent, total)
         ok     = false,
         label  = label or "abort"
     })
-    -- ปิดด้วย GiftDone(ok=false) ให้ระบบสรุปรอบนี้
     sendFn("GiftDone", { ok = false, sent = tonumber(sent or 0) or 0, total = tonumber(total or 0) or 0 })
+    clearGiftSession()
     return false
 end
 
@@ -537,15 +581,13 @@ local function giftBatchFiltered(sendFn, payload)
 
     local labelForMsg = (payload.T or "-") .. ((payload.M and payload.M~="") and (" • "..tostring(payload.M)) or "")
 
-    local sent=0; giftCancelFlag=false
-    local failCountGlobal, FAIL_LIMIT_GLOBAL = 0, math.max(5, math.ceil(want/2))
+    local sent=0
+    beginGiftSession("eggs", targetKey, payload.T, payload.M or "-", nil, want)
     giftProgress(sendFn, 0, want, "start")
 
-    -- ตรวจครั้งแรกก่อนเริ่ม
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
 
     while sent < want do
-        -- ถูกสั่งหยุดจากเว็บ?
         if giftCancelFlag then
             sendFn("GiftAbort", {
                 reason = "stopped-by-web",
@@ -556,31 +598,26 @@ local function giftBatchFiltered(sendFn, payload)
                 label  = labelForMsg
             })
             sendFn("GiftDone", { ok = false, sent = sent, total = want })
+            clearGiftSession()
             return
         end
-    
-        -- ผู้รับยังอยู่ห้องไหม
+
         if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then
             return
         end
-    
+
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
-    
+
         local ok = giftOnceEgg(target, egg.uid)
         if ok then
             sent += 1
             giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
-        else
-            failCountGlobal += 1
-            if failCountGlobal >= FAIL_LIMIT_GLOBAL then
-                sendFn("GiftDone",{ok=false,sent=sent,total=want})
-                return
-            end
         end
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+    clearGiftSession()
 end
 
 -- ===== Gift Batch (Eggs by UIDs) =====
@@ -592,9 +629,10 @@ local function giftBatchUIDs(sendFn, payload)
 
     local uids = payload.UIDs
     if type(uids)~="table" or #uids==0 then sendFn("GiftDone",{ok=false,reason="no UIDs",sent=0,total=0}); return end
-    local total=#uids; local sent=0; giftCancelFlag=false
+    local total=#uids; local sent=0
     local labelForMsg = "Eggs (UID list)"
 
+    beginGiftSession("uids", targetKey, nil, nil, nil, total)
     giftProgress(sendFn, 0, total, "start")
 
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then return end
@@ -610,13 +648,14 @@ local function giftBatchUIDs(sendFn, payload)
                 label  = labelForMsg
             })
             sendFn("GiftDone",{ ok=false, sent=sent, total=total })
+            clearGiftSession()
             return
         end
-    
+
         if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then
             return
         end
-    
+
         local ok = giftOnceEgg(target, uid)
         if ok then
             sent += 1
@@ -625,6 +664,7 @@ local function giftBatchUIDs(sendFn, payload)
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=total),sent=sent,total=total})
+    clearGiftSession()
 end
 
 -- ===== Gift Batch (Foods) =====
@@ -645,7 +685,8 @@ local function giftBatchFood(sendFn, payload)
 
     local labelForMsg = tostring(foodName)
 
-    local sent=0; giftCancelFlag=false
+    local sent=0
+    beginGiftSession("foods", targetKey, nil, nil, foodName, want)
     giftProgress(sendFn, 0, want, foodName)
 
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
@@ -661,13 +702,14 @@ local function giftBatchFood(sendFn, payload)
                 label  = labelForMsg
             })
             sendFn("GiftDone",{ ok=false, sent=sent, total=want })
+            clearGiftSession()
             return
         end
-    
+
         if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then
             return
         end
-    
+
         if getFoodCount(foodName) <= 0 then break end
         local ok = giftOnceFood(target, foodName)
         if ok then
@@ -677,6 +719,7 @@ local function giftBatchFood(sendFn, payload)
         task.wait(0.08)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+    clearGiftSession()
 end
 
 -- ===== 6) ชื่อห้อง =====
@@ -760,13 +803,26 @@ local function onSocketMessage(self, raw)
         return
     end
 
-    -- === Cancel ===
-    if name == "GiftStop" or name == "GiftFoodStop" then
-        giftCancelFlag = true
-        slog("[Gift] cancel requested (" .. tostring(name) .. ")")
+    -- === Cancel (GiftStop / GiftFoodStop) — ตรวจจับเฉพาะรอบที่ตรงกับ Target + ชนิด ===
+    if name == "GiftStop" then
+        if payloadMatchesCurrentStop("eggs", payload) or currentGift and currentGift.mode=="uids" and tostring(payload.Target or "")==currentGift.target then
+            giftCancelFlag = true
+            slog("[Gift] cancel requested (eggs) for target="..tostring(payload.Target).." T="..tostring(payload.T).." M="..tostring(payload.M))
+        else
+            slog("[Gift] cancel ignored (no matching egg session)")
+        end
         return
     end
-end  -- 🔴 ปิดฟังก์ชัน onSocketMessage (จุดที่ขาดไปเดิม)
+    if name == "GiftFoodStop" then
+        if payloadMatchesCurrentStop("foods", payload) then
+            giftCancelFlag = true
+            slog("[Gift] cancel requested (food) for target="..tostring(payload.Target).." Food="..tostring(payload.Food))
+        else
+            slog("[Gift] cancel ignored (no matching food session)")
+        end
+        return
+    end
+end  -- 🔴 ปิดฟังก์ชัน onSocketMessage
 
 -- ===== 9) Connect / Loop =====
 function Nexus:Connect(host)
@@ -785,7 +841,7 @@ function Nexus:Connect(host)
             self.Socket = sock; self.IsConnected = true
             print("[NexusLite] Connected → ws://" .. self.Host .. self.Path)
 
-            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed") end) end
+            if sock.OnClose    then sock.OnClose  :Connect(function() self.IsConnected = false; print("[NexusLite] WS closed"); clearGiftSession() end) end
             if sock.OnMessage then sock.OnMessage:Connect(function(msg) onSocketMessage(self, msg) end) end
 
             -- ส่งค่าพื้นฐาน
@@ -855,6 +911,7 @@ end
 function Nexus:Stop()
     self.IsConnected = false
     if self.Socket then pcall(function() self.Socket:Close() end) end
+    clearGiftSession()
 end
 
 -- ===== 10) Hooks =====
