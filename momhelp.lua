@@ -547,19 +547,35 @@ local function giftBatchFiltered(sendFn, payload)
     -- ตรวจครั้งแรกก่อนเริ่ม
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
 
-    while sent < want and not giftCancelFlag do
-        -- ตรวจผู้รับยังออนไลน์ไหมในทุก iteration
-        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
-
+        while sent < want do
+        -- ถูกสั่งหยุดจากเว็บ?
+        if giftCancelFlag then
+            sendFn("GiftAbort", {
+                reason = "stopped-by-web",
+                sent   = sent,
+                total  = want,
+                ts     = nowsec(),
+                ok     = false,
+                label  = labelForMsg
+            })
+            sendFn("GiftDone", { ok = false, sent = sent, total = want })
+            return
+        end
+    
+        -- ผู้รับยังอยู่ห้องไหม
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then
+            return
+        end
+    
         local egg = listEggsFiltered(typeSet, mutSet, 1)[1]
         if not egg then break end
-
+    
         local ok = giftOnceEgg(target, egg.uid)
         if ok then
             sent += 1
             giftProgress(sendFn, sent, want, (egg.T .. (egg.M and (" • "..egg.M) or "")))
         else
-            failCountGlobal  += 1
+            failCountGlobal += 1
             if failCountGlobal >= FAIL_LIMIT_GLOBAL then
                 sendFn("GiftDone",{ok=false,sent=sent,total=want})
                 return
@@ -568,6 +584,7 @@ local function giftBatchFiltered(sendFn, payload)
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+
 end
 
 -- ===== Gift Batch (Eggs by UIDs) =====
@@ -587,10 +604,23 @@ local function giftBatchUIDs(sendFn, payload)
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then return end
 
     for _,uid in ipairs(uids) do
-        if giftCancelFlag then break end
-
-        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then return end
-
+        if giftCancelFlag then
+            sendFn("GiftAbort", {
+                reason = "stopped-by-web",
+                sent   = sent,
+                total  = total,
+                ts     = nowsec(),
+                ok     = false,
+                label  = labelForMsg
+            })
+            sendFn("GiftDone",{ ok=false, sent=sent, total=total })
+            return
+        end
+    
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, total) then
+            return
+        end
+    
         local ok = giftOnceEgg(target, uid)
         if ok then
             sent += 1
@@ -624,9 +654,24 @@ local function giftBatchFood(sendFn, payload)
 
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
 
-    while sent < want and not giftCancelFlag do
-        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
-
+    while sent < want do
+        if giftCancelFlag then
+            sendFn("GiftAbort", {
+                reason = "stopped-by-web",
+                sent   = sent,
+                total  = want,
+                ts     = nowsec(),
+                ok     = false,
+                label  = labelForMsg
+            })
+            sendFn("GiftDone",{ ok=false, sent=sent, total=want })
+            return
+        end
+    
+        if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then
+            return
+        end
+    
         if getFoodCount(foodName) <= 0 then break end
         local ok = giftOnceFood(target, foodName)
         if ok then
@@ -636,6 +681,7 @@ local function giftBatchFood(sendFn, payload)
         task.wait(0.08)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
+
 end
 
 -- ===== 6) ชื่อห้อง =====
@@ -720,8 +766,11 @@ local function onSocketMessage(self, raw)
     end
 
     -- === Cancel ===
-    if name == "GiftStop" then giftCancelFlag = true; slog("[Gift] cancel requested"); return end
-end
+    if name == "GiftStop" or name == "GiftFoodStop" then
+        giftCancelFlag = true
+        slog("[Gift] cancel requested (" .. tostring(name) .. ")")
+        return
+    end
 
 -- ===== 9) Connect / Loop =====
 function Nexus:Connect(host)
@@ -821,3 +870,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
+
