@@ -25,9 +25,9 @@ if not WSConnect then
 end
 
 -- ===== 2) Services =====
-local HttpService        = game:GetService("HttpService")
-local Players            = game:GetService("Players")
-local Workspace          = game:GetService("Workspace")
+local HttpService          = game:GetService("HttpService")
+local Players              = game:GetService("Players")
+local Workspace            = game:GetService("Workspace")
 local MarketplaceService   = game:GetService("MarketplaceService")
 local ReplicatedStorage    = game:GetService("ReplicatedStorage")
 local VirtualInputManager  = game:GetService("VirtualInputManager")
@@ -75,9 +75,9 @@ local function getCharacterSnapshot()
     local pos = hrp and hrp.Position
     return {
         characterName = char.Name,
-        health      = hum and hum.Health or nil,
-        maxHealth = hum and hum.MaxHealth or nil,
-        position  = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
+        health   = hum and hum.Health or nil,
+        maxHealth= hum and hum.MaxHealth or nil,
+        position = pos and { x = round1(pos.X), y = round1(pos.Y), z = round1(pos.Z) } or nil,
     }
 end
 
@@ -190,10 +190,7 @@ local function tileOccupied(part)
     if pets then table.insert(include, pets) end
     if #include == 0 then include = { Workspace } end
     params.FilterDescendantsInstances = include
-    
-    -- (ทางเลือก) ลดภาระ scan
-    params.MaxParts = 2000 -- ปรับตามขนาดแมพ
-    -- params.CollisionGroup = "Default" -- ถ้าคุณใช้ระบบ CG
+    params.MaxParts = 2000
 
     local parts = Workspace:GetPartBoundsInBox(centerCF, size, params)
     if #parts == 0 then return false end
@@ -547,7 +544,7 @@ local function giftBatchFiltered(sendFn, payload)
     -- ตรวจครั้งแรกก่อนเริ่ม
     if not ensureTargetOnlineOrAbort(sendFn, targetKey, labelForMsg, sent, want) then return end
 
-        while sent < want do
+    while sent < want do
         -- ถูกสั่งหยุดจากเว็บ?
         if giftCancelFlag then
             sendFn("GiftAbort", {
@@ -584,7 +581,6 @@ local function giftBatchFiltered(sendFn, payload)
         task.wait(0.10)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
-
 end
 
 -- ===== Gift Batch (Eggs by UIDs) =====
@@ -681,7 +677,6 @@ local function giftBatchFood(sendFn, payload)
         task.wait(0.08)
     end
     sendFn("GiftDone",{ok=(sent>=want),sent=sent,total=want})
-
 end
 
 -- ===== 6) ชื่อห้อง =====
@@ -771,6 +766,7 @@ local function onSocketMessage(self, raw)
         slog("[Gift] cancel requested (" .. tostring(name) .. ")")
         return
     end
+end  -- 🔴 ปิดฟังก์ชัน onSocketMessage (จุดที่ขาดไปเดิม)
 
 -- ===== 9) Connect / Loop =====
 function Nexus:Connect(host)
@@ -850,7 +846,6 @@ function Nexus:Connect(host)
                     end
                 end
 
-
                 task.wait(1)
             end
         end
@@ -870,4 +865,3 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
 Nexus:Connect("test888.ddns.net:3005")
-
