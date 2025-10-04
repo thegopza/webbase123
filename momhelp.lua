@@ -1,5 +1,5 @@
 --[[
-Nexus (full) — WS <-> Backend (port 3008)
+Nexus (full) — WS <-> Backend (port 3005)
 - ping 1s
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
@@ -33,7 +33,6 @@ local MarketplaceService   = game:GetService("MarketplaceService")
 local ReplicatedStorage    = game:GetService("ReplicatedStorage")
 local VirtualInputManager  = game:GetService("VirtualInputManager")
 local TeleportService    = game:GetService("TeleportService")
-local AnalyticsService   = game:GetService("RbxAnalyticsService")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
@@ -66,88 +65,6 @@ local function parseNumberLikeText(s)
     s = s:gsub("[^%d%.-]", "")
     local n = tonumber(s)
     return n
-end
-
-
-local function computeHwId()
-    local ok, clientId = pcall(function()
-        return AnalyticsService and AnalyticsService:GetClientId()
-    end)
-    if ok and clientId then return clientId end
-    return ('hwid-' .. tostring(LocalPlayer.UserId))
-end
-
-local function pickHttpRequest()
-    return (syn and syn.request)
-        or (http and http.request)
-        or request
-        or http_request
-end
-
-local function postLocalTitle(newTitle)
-    if not newTitle then return false end
-    local req = pickHttpRequest()
-    if not req then return false end
-    local payload = HttpService:JSONEncode({ title = tostring(newTitle) })
-    local ok, res = pcall(req, {
-        Url = 'http://127.0.0.1:3006/title',
-        Method = 'POST',
-        Headers = { ['Content-Type'] = 'application/json' },
-        Body = payload
-    })
-    if not ok or not res then return false end
-    local status = res.StatusCode or res.Status or res.Code
-    if typeof(status) == 'number' then
-        return status >= 200 and status < 300
-    end
-    return true
-end
-
-local readGiftDaily
-local detectMoney
-
-local function shortMoneyText(val)
-    if type(val) ~= 'number' then return '?' end
-    local abs = math.abs(val)
-    local sign = val < 0 and '-' or ''
-    if abs >= 1e9 then
-        return sign .. string.format('%.1fB', abs/1e9)
-    elseif abs >= 1e6 then
-        return sign .. string.format('%.1fM', abs/1e6)
-    elseif abs >= 1e3 then
-        return sign .. string.format('%.1fK', abs/1e3)
-    end
-    return sign .. tostring(math.floor(val))
-end
-
-local function buildTitlebarText()
-    local charSnap = getCharacterSnapshot()
-    local charName = (charSnap and charSnap.characterName) or LocalPlayer.Name
-
-    local placeName = nil
-    local okPlace, info = pcall(function()
-        return MarketplaceService:GetProductInfo(game.PlaceId)
-    end)
-    if okPlace and info and info.Name then
-        placeName = info.Name
-    end
-
-    local gpd = readGiftDaily and readGiftDaily() or nil
-    local gpdText = '?'
-    if gpd then
-        local used = tonumber(gpd.used) or 0
-        local limit = tonumber(gpd.limit) or 0
-        gpdText = string.format('%d/%d', used, limit)
-    end
-
-    local moneyVal = detectMoney and detectMoney() or nil
-    local moneyText = moneyVal and shortMoneyText(moneyVal) or '?'
-
-    return string.format('%s | %s | GPD %s | $%s',
-        placeName or ('Place ' .. tostring(game.PlaceId)),
-        charName,
-        gpdText,
-        moneyText)
 end
 
 
@@ -351,7 +268,7 @@ local function searchMoneyInGui()
     end
     scan(pg, 0); return found
 end
-function detectMoney() return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui() end
+local function detectMoney() return readFromLeaderstats() or readFromAttributes() or searchMoneyInGui() end
 
 -- ===== 4) รายชื่อผู้เล่น (Roster) =====
 local function buildRoster()
@@ -416,7 +333,7 @@ local function getFoodCount(name)
 end
 
 -- ===== NEW: Gift daily counter (UserFlag) =====
-function readGiftDaily()
+local function readGiftDaily()
     -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
     local data = pg:FindFirstChild("Data");                         if not data then return nil end
@@ -816,30 +733,20 @@ local function makeRoomName()
 end
 
 -- ===== 7) WS Manager =====
-local Nexus = { Host = "test888.ddns.net:3008", Path = "/Nexus", IsConnected = false, Socket = nil }
-Nexus.Hwid = getgenv().NexusHwId or computeHwId()
-Nexus.OwnerName = getgenv().NexusOwner or LocalPlayer.Name
-if getgenv().NexusHost then Nexus.Host = tostring(getgenv().NexusHost) end
-if getgenv().NexusPath then Nexus.Path = tostring(getgenv().NexusPath) end
+local Nexus = { Host = "test888.ddns.net:3005", Path = "/Nexus", IsConnected = false, Socket = nil }
 function Nexus:Send(Name, Payload)
     if not (self.Socket and self.IsConnected) then return end
     local ok, msg = pcall(function() return HttpService:JSONEncode({ Name = Name, Payload = Payload }) end)
     if ok and msg then pcall(function() self.Socket:Send(msg) end) end
 end
 function Nexus:_wsUrl()
-    local q = ("name=%s&id=%s&jobId=%s&roomName=%s&hwid=%s&owner=%s"):format(
+    local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
         HttpService:UrlEncode(LocalPlayer.Name),
         HttpService:UrlEncode(LocalPlayer.UserId),
         HttpService:UrlEncode(game.JobId),
-        HttpService:UrlEncode(makeRoomName()),
-        HttpService:UrlEncode(self.Hwid or ''),
-        HttpService:UrlEncode(self.OwnerName or LocalPlayer.Name)
+        HttpService:UrlEncode(makeRoomName())
     )
-    local hostPart = tostring(self.Host or '')
-    if hostPart:match('^%w+://') then
-        return ("%s%s?%s"):format(hostPart, self.Path, q)
-    end
-    return ("ws://%s%s?%s"):format(hostPart, self.Path, q)
+    return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
 
 -- ===== 8) onMessage (Exec/Echo/Gift) =====
@@ -974,8 +881,7 @@ function Nexus:Connect(host)
 
             local lastMoney, lastFarmsJson, lastCharJson
             local lastGiftJson -- NEW: diff GiftDaily
-            local lastTitleText
-            local tRoster, tInv, tChar, tFarm, tGift, tPet, tTitle = 0, 0, 0, 0, 0, 0, 0
+            local tRoster, tInv, tChar, tFarm, tGift, tPet = 0, 0, 0, 0, 0, 0
 
             while self.IsConnected do
                 self:Send("ping", { t = nowsec() })
@@ -1014,31 +920,20 @@ function Nexus:Connect(host)
                 end
 
                 -- NEW: ส่งยอด Gift/Day แบบไม่ยุ่งกับระบบ Gift เดิม
+                tGift += 1
+                if tGift >= 2 then
+                    tGift = 0
+                    local g = readGiftDaily()
+                    if g then
+                        local js = HttpService:JSONEncode(g)
+                        if js ~= lastGiftJson then
+                            lastGiftJson = js
+                            self:Send("SetGiftDaily", g)
+                        end
+                    end
+                end
 
-tGift += 1
-if tGift >= 2 then
-    tGift = 0
-    local g = readGiftDaily()
-    if g then
-        local js = HttpService:JSONEncode(g)
-        if js ~= lastGiftJson then
-            lastGiftJson = js
-            self:Send("SetGiftDaily", g)
-        end
-    end
-end
-
-tTitle += 1
-if tTitle >= 2 then
-    tTitle = 0
-    local titleText = buildTitlebarText()
-    if titleText and titleText ~= lastTitleText then
-        lastTitleText = titleText
-        postLocalTitle(titleText)
-    end
-end
-
-task.wait(1)
+                task.wait(1)
             end
         end
     end
@@ -1057,4 +952,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
-Nexus:Connect("test888.ddns.net:3008")
+Nexus:Connect("test888.ddns.net:3005")
