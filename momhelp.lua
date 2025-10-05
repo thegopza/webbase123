@@ -1,5 +1,5 @@
 --[[
-Nexus (full) — WS <-> Backend (port 8088)
+Nexus (full) — WS <-> Backend (port 65535)
 - ping 1s
 - money auto-detect (leaderstats/attr/gui)
 - roster 2s
@@ -10,8 +10,9 @@ Nexus (full) — WS <-> Backend (port 8088)
 - Gift (Eggs: GiftStart / GiftUIDs พร้อม confirm ว่าลดจริง, Foods: GiftFoodStart พร้อม confirm ว่าลด count)
 - GiftStop ยกเลิกกลางคัน (match ตาม Target + T/M หรือ Food)
 - auto reconnect
-- NEW: SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
-]]
+- SetGiftDaily (อ่านยอดกิฟต์/วันจาก PlayerGui.Data.UserFlag แล้วส่งให้ backend)
+- HWID support (UI + file + getgenv)
+]]--
 
 -- ===== 0) รอเกมโหลด =====
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -32,7 +33,7 @@ local Workspace            = game:GetService("Workspace")
 local MarketplaceService   = game:GetService("MarketplaceService")
 local ReplicatedStorage    = game:GetService("ReplicatedStorage")
 local VirtualInputManager  = game:GetService("VirtualInputManager")
-local TeleportService    = game:GetService("TeleportService")
+local TeleportService      = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do LocalPlayer = Players.LocalPlayer task.wait() end
@@ -67,6 +68,131 @@ local function parseNumberLikeText(s)
     return n
 end
 
+-- ===== HWID Setup (UI + file persistence + getgenv) =====
+local function makeFolderSafe(p) pcall(function() if makefolder then makefolder(p) end end) end
+local function readFileSafe(p)
+    local ok, r = pcall(function() if isfile and isfile(p) then return readfile(p) end end)
+    if ok and r then
+        r = tostring(r):gsub("^%s+", ""):gsub("%s+$", "")
+        if #r > 0 then return r end
+    end
+    return nil
+end
+local function writeFileSafe(p, s)
+    pcall(function()
+        if writefile then
+            local dir = p:match("^(.-)/[^/]+$")
+            if dir then makeFolderSafe(dir) end
+            writefile(p, s)
+        end
+    end)
+end
+
+local function promptHWIDUI(defaultText)
+    local done = Instance.new("BindableEvent")
+    local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui")
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "Nexus_HwidPrompt"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.IgnoreGuiInset = true
+    gui.Parent = pg
+
+    local frame = Instance.new("Frame", gui)
+    frame.Size = UDim2.new(0, 420, 0, 200)
+    frame.Position = UDim2.new(0.5, -210, 0.5, -100)
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.BackgroundColor3 = Color3.fromRGB(24,24,24)
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1, -20, 0, 28)
+    title.Position = UDim2.new(0, 10, 0, 10)
+    title.BackgroundTransparency = 1
+    title.Text = "Nexus • Enter HWID"
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18
+    title.TextColor3 = Color3.fromRGB(255,255,255)
+
+    local box = Instance.new("TextBox", frame)
+    box.Size = UDim2.new(1, -20, 0, 36)
+    box.Position = UDim2.new(0, 10, 0, 56)
+    box.BackgroundColor3 = Color3.fromRGB(36,36,36)
+    box.TextColor3 = Color3.fromRGB(255,255,255)
+    box.PlaceholderText = "Paste HWID here (จาก Python)"
+    box.Text = tostring(defaultText or "")
+    box.ClearTextOnFocus = false
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 16
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+
+    local saveBtn = Instance.new("TextButton", frame)
+    saveBtn.Size = UDim2.new(0.5, -15, 0, 36)
+    saveBtn.Position = UDim2.new(0, 10, 0, 110)
+    saveBtn.Text = "Save"
+    saveBtn.Font = Enum.Font.GothamBold
+    saveBtn.TextSize = 16
+    saveBtn.BackgroundColor3 = Color3.fromRGB(0,170,127)
+    saveBtn.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", saveBtn).CornerRadius = UDim.new(0, 8)
+
+    local cancelBtn = Instance.new("TextButton", frame)
+    cancelBtn.Size = UDim2.new(0.5, -15, 0, 36)
+    cancelBtn.Position = UDim2.new(0.5, 5, 0, 110)
+    cancelBtn.Text = "Cancel"
+    cancelBtn.Font = Enum.Font.GothamBold
+    cancelBtn.TextSize = 16
+    cancelBtn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    cancelBtn.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", cancelBtn).CornerRadius = UDim.new(0, 8)
+
+    saveBtn.MouseButton1Click:Connect(function()
+        local t = tostring(box.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if #t == 0 then
+            box.Text = ""
+            box.PlaceholderText = "HWID ต้องไม่ว่าง"
+            return
+        end
+        done:Fire(t)
+    end)
+    cancelBtn.MouseButton1Click:Connect(function() done:Fire(nil) end)
+
+    local val = done.Event:Wait()
+    gui:Destroy()
+    return val
+end
+
+local function loadHWID()
+    -- 1) env
+    local envH = (getgenv and getgenv().NEXUS_HWID)
+    if type(envH) == "string" and #envH > 0 then return envH end
+
+    -- 2) file
+    local path = "nexus_client/hwid.txt"
+    local fh = readFileSafe(path)
+    if type(fh) == "string" and #fh > 0 then
+        if getgenv then getgenv().NEXUS_HWID = fh end
+        return fh
+    end
+
+    -- 3) UI (ask user)
+    local typed = promptHWIDUI()
+    if type(typed) == "string" and #typed > 0 then
+        writeFileSafe(path, typed)
+        if getgenv then getgenv().NEXUS_HWID = typed end
+        return typed
+    end
+    return nil
+end
+
+-- เรียกใช้งานก่อนต่อ WS:
+local HWID = loadHWID()
+if not HWID then
+    warn("[NexusLite] HWID ยังไม่ถูกตั้งค่า — ยกเลิกการเชื่อมต่อ")
+    return
+end
 
 -- ===== Helpers: Character snapshot =====
 local function getCharacterSnapshot()
@@ -311,7 +437,7 @@ local function canonicalFoodName(input)
 end
 local function foodsAssetFolder()
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                         if not data then return nil end
+    local data = pg:FindFirstChild("Data");          if not data then return nil end
     return data:FindFirstChild("Asset")
 end
 local function readFoods()
@@ -336,8 +462,8 @@ end
 local function readGiftDaily()
     -- path: Players.LocalPlayer.PlayerGui.Data.UserFlag (Configuration)
     local pg   = Players.LocalPlayer:FindFirstChild("PlayerGui"); if not pg then return nil end
-    local data = pg:FindFirstChild("Data");                         if not data then return nil end
-    local uf   = data:FindFirstChild("UserFlag");                   if not uf then return nil end
+    local data = pg:FindFirstChild("Data");          if not data then return nil end
+    local uf   = data:FindFirstChild("UserFlag");    if not uf then return nil end
     local usedAttr = uf:GetAttribute("TodaySendGiftCount")
     local dateAttr = uf:GetAttribute("TodaySendGiftTimer") -- คาดว่า YYYYMMDD
     local used = tonumber(usedAttr) or 0
@@ -733,18 +859,19 @@ local function makeRoomName()
 end
 
 -- ===== 7) WS Manager =====
-local Nexus = { Host = "test888.ddns.net:8088", Path = "/Nexus", IsConnected = false, Socket = nil }
+local Nexus = { Host = "test888.ddns.net:65535", Path = "/Nexus", IsConnected = false, Socket = nil }
 function Nexus:Send(Name, Payload)
     if not (self.Socket and self.IsConnected) then return end
     local ok, msg = pcall(function() return HttpService:JSONEncode({ Name = Name, Payload = Payload }) end)
     if ok and msg then pcall(function() self.Socket:Send(msg) end) end
 end
 function Nexus:_wsUrl()
-    local q = ("name=%s&id=%s&jobId=%s&roomName=%s"):format(
-        HttpService:UrlEncode(LocalPlayer.Name),
-        HttpService:UrlEncode(LocalPlayer.UserId),
-        HttpService:UrlEncode(game.JobId),
-        HttpService:UrlEncode(makeRoomName())
+    local q = ("name=%s&id=%s&jobId=%s&roomName=%s&hwid=%s"):format(
+        HttpService:UrlEncode(tostring(LocalPlayer.Name)),
+        HttpService:UrlEncode(tostring(LocalPlayer.UserId)),
+        HttpService:UrlEncode(tostring(game.JobId)),
+        HttpService:UrlEncode(tostring(makeRoomName())),
+        HttpService:UrlEncode(tostring(HWID))
     )
     return ("ws://%s%s?%s"):format(self.Host, self.Path, q)
 end
@@ -952,4 +1079,4 @@ LocalPlayer.OnTeleport:Connect(function(state) if state == Enum.TeleportState.St
 
 -- ===== 11) Expose & Start =====
 getgenv().Nexus = Nexus
-Nexus:Connect("test888.ddns.net:8088")
+Nexus:Connect("test888.ddns.net:65535")
