@@ -25,6 +25,8 @@ WebSocket.OnMessage:Connect(function(Msg)
     print(Msg) -- Print messages sent to SX.
 end)
 
+WebSocket:Send("gamer vision " .. tostring(Ctr)) 
+
 if not WSConnect then
     if messagebox then
         messagebox(('Nexus encountered an error while launching!\n\n%s'):format('Your exploit (' .. (identifyexecutor and identifyexecutor() or 'UNKNOWN') .. ') is not supported'), 'Roblox Account Manager', 0)
