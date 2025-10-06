@@ -19,13 +19,44 @@ if not game:IsLoaded() then
 end
 
 local Nexus = {}
-local WebSocket = WebSocket.connect("wss://echo.websocket.org") 
 
-WebSocket.OnMessage:Connect(function(Msg)
-    print(Msg) -- Print messages sent to SX.
-end)
+local function resolveConnector()
+    local function firstValid(list)
+        for _, connector in ipairs(list) do
+            if typeof(connector) == "function" then
+                return connector
+            end
+        end
+    end
 
-WebSocket:Send("gamer vision " .. tostring(Ctr)) 
+    local synapseConnector = syn and syn.websocket and syn.websocket.connect
+
+    local krnlConnector
+    if Krnl then
+        krnlConnector = (function()
+            repeat task.wait() until Krnl.WebSocket and (Krnl.WebSocket.connect or Krnl.WebSocket.Connect)
+            return Krnl.WebSocket.connect or Krnl.WebSocket.Connect
+        end)()
+    end
+
+    local seliwareConnector
+    if Seliware then
+        seliwareConnector = Seliware.WebSocketConnect
+            or (Seliware.WebSocket and (Seliware.WebSocket.connect or Seliware.WebSocket.Connect))
+            or Seliware.connect
+    end
+
+    local genericConnector = WebSocket and (WebSocket.connect or WebSocket.Connect)
+
+    return firstValid {
+        synapseConnector,
+        krnlConnector,
+        seliwareConnector,
+        genericConnector,
+    }
+end
+
+local WSConnect = resolveConnector()
 
 if not WSConnect then
     if messagebox then
