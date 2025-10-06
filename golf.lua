@@ -19,9 +19,7 @@ if not game:IsLoaded() then
 end
 
 local Nexus = {}
-local WSConnect = syn and websocket.connect or
-    (Krnl and (function() repeat task.wait() until WebSocket and WebSocket.connect return WebSocket.connect end)()) or
-    WebSocket and WebSocket.connect
+local WebSocket = WebSocket.connect("wss://echo.websocket.org") 
 
 if not WSConnect then
     if messagebox then
