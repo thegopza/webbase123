@@ -21,42 +21,30 @@ end
 local Nexus = {}
 
 local function resolveConnector()
-    local function firstValid(list)
-        for _, connector in ipairs(list) do
-            if typeof(connector) == "function" then
-                return connector
-            end
+    local function krnlConnector()
+        repeat task.wait() until Krnl.WebSocket and (Krnl.WebSocket.connect or Krnl.WebSocket.Connect)
+        return Krnl.WebSocket.connect or Krnl.WebSocket.Connect
+    end
+
+    local candidates = {
+        {syn and syn.websocket and syn.websocket.connect, "Synapse"},
+        {Krnl and krnlConnector(), "Krnl"},
+        {Seliware and (Seliware.WebSocketConnect
+            or (Seliware.WebSocket and (Seliware.WebSocket.connect or Seliware.WebSocket.Connect))
+            or Seliware.connect), "Seliware"},
+        {WebSocket and (WebSocket.connect or WebSocket.Connect), "Generic"},
+    }
+
+    for _, entry in ipairs(candidates) do
+        local connector, label = entry[1], entry[2]
+
+        if typeof(connector) == "function" then
+            return connector, label
         end
     end
-
-    local synapseConnector = syn and syn.websocket and syn.websocket.connect
-
-    local krnlConnector
-    if Krnl then
-        krnlConnector = (function()
-            repeat task.wait() until Krnl.WebSocket and (Krnl.WebSocket.connect or Krnl.WebSocket.Connect)
-            return Krnl.WebSocket.connect or Krnl.WebSocket.Connect
-        end)()
-    end
-
-    local seliwareConnector
-    if Seliware then
-        seliwareConnector = Seliware.WebSocketConnect
-            or (Seliware.WebSocket and (Seliware.WebSocket.connect or Seliware.WebSocket.Connect))
-            or Seliware.connect
-    end
-
-    local genericConnector = WebSocket and (WebSocket.connect or WebSocket.Connect)
-
-    return firstValid {
-        synapseConnector,
-        krnlConnector,
-        seliwareConnector,
-        genericConnector,
-    }
 end
 
-local WSConnect = resolveConnector()
+local WSConnect, WSConnectorName = resolveConnector()
 
 if not WSConnect then
     if messagebox then
@@ -64,6 +52,10 @@ if not WSConnect then
     end
     
     return
+end
+
+if WSConnectorName then
+    print(('[Nexus] Using %s websocket connector'):format(WSConnectorName))
 end
 
 local TeleportService = game:GetService'TeleportService'
@@ -261,12 +253,30 @@ do -- Nexus
             if self.Terminated then break end
 
             if not Host then
-                Host = 'localhost:5242'
+                Host = '127.0.0.1:5242'
             end
 
-            local Success, Socket = pcall(WSConnect, ('ws://%s/Nexus?name=%s&id=%s&jobId=%s'):format(Host, LocalPlayer.Name, LocalPlayer.UserId, game.JobId))
+            local Endpoint = Host
 
-            if not Success then task.wait(12) continue end
+            if not Endpoint:find('^wss?://') then
+                Endpoint = 'ws://' .. Endpoint
+            end
+
+            local Url = ('%s/Nexus?name=%s&id=%s&jobId=%s'):format(Endpoint, LocalPlayer.Name, LocalPlayer.UserId, game.JobId)
+
+            local Success, Socket = pcall(WSConnect, Url)
+
+            if not Success then
+                warn(('[Nexus] WebSocket connection failed (%s), retrying in 12 seconds...'):format(tostring(Socket)))
+                task.wait(12)
+                continue
+            end
+
+            if not Socket then
+                warn('[Nexus] WebSocket returned nil socket, retrying in 12 seconds...')
+                task.wait(12)
+                continue
+            end
 
             self.Socket = Socket
             self.IsConnected = true
